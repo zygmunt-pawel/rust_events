@@ -39,3 +39,7 @@ pub use crate::history::{DeliveryStatus, EventRecord, HandlerDeliveryRecord, His
 
 pub mod outbox;
 pub use crate::outbox::Outbox;
+
+pub mod purge;
+pub use crate::purge::{purge_dispatch_keys, purge_events, purge_terminal_deliveries};
+pub use pg_work_queue::{purge_dead, purge_done};
