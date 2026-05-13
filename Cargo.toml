@@ -2,7 +2,7 @@
 name = "rust_events"
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.88"
 license = "MIT"
 description = "Transactional outbox for Rust services on Postgres, built on pg_work_queue"
 repository = "https://github.com/pawel/rust_events"
