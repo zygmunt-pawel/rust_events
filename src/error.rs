@@ -188,14 +188,13 @@ pub enum StartError {
 }
 
 /// Errors returned by `OutboxHandle::shutdown()`.
+///
+/// The pending-count query is best-effort and never produces a variant here —
+/// see [`crate::handle::OutboxHandle::shutdown`] for the degradation behavior.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum ShutdownError {
     /// The underlying `pg_work_queue` worker shutdown failed.
     #[error("pg_work_queue worker shutdown failed")]
     Pgwq(#[from] pg_work_queue::ShutdownError),
-
-    /// Querying the pending delivery count at shutdown time failed.
-    #[error("could not count pending deliveries at shutdown")]
-    PendingCount(#[source] sqlx::Error),
 }

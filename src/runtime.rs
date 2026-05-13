@@ -235,7 +235,11 @@ impl OutboxRuntime {
                 UPDATE outbox.handler_deliveries hd
                 SET status = 'running',
                     lease_token = $4,
-                    attempts = $3,
+                    -- GREATEST so a stale-worker fence-out followed by a fresh
+                    -- claim (where pgwq's ctx.attempt resets) cannot regress
+                    -- the audit counter. Operators alerting on attempts > N
+                    -- see monotone growth, not flapping.
+                    attempts = GREATEST(hd.attempts, $3),
                     last_attempted_at = now(),
                     first_attempted_at = COALESCE(hd.first_attempted_at, now()),
                     last_error = NULL

@@ -56,6 +56,7 @@ pub struct HandlerDeliveryRecord {
 /// Delivery status of a handler delivery row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "outbox.delivery_status", rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum DeliveryStatus {
     /// Waiting to be picked up by the worker.
     Queued,

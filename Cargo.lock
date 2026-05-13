@@ -1524,7 +1524,8 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pg_work_queue"
-version = "0.1.0"
+version = "0.1.1"
+source = "git+https://github.com/zygmunt-pawel/pg_work_queue.git?tag=v0.1.1#8392aec492955d81bba7fd96a91c966e00b50200"
 dependencies = [
  "chrono",
  "rand 0.10.1",
