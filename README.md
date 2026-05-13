@@ -11,9 +11,9 @@ Full design rationale: `docs/superpowers/specs/2026-05-13-rust-events-design.md`
 - Version: `0.1.0` (pre-publish)
 - Requires: PostgreSQL 18+ (uses `uuidv7()` native), Rust 1.88+
 - License: MIT
-- Depends on: `pg_work_queue >= 0.1`
+- Depends on: `pg_work_queue` v0.1.1 (tag-pinned via git; the v0.1.1 fix `set_ignore_missing(true)` in the migrator is load-bearing for the `_sqlx_migrations` coexistence story)
 
-This crate is production-ready for modular monolith workloads on Postgres 18. It is not yet published to crates.io; reference it via path or git dependency.
+This crate is production-ready for modular monolith workloads on Postgres 18. Neither `rust_events` nor `pg_work_queue` is yet published to crates.io; reference both via git dependency.
 
 ---
 
@@ -24,12 +24,13 @@ This crate is production-ready for modular monolith workloads on Postgres 18. It
 3. [Architecture](#architecture)
 4. [Delivery semantics](#delivery-semantics)
 5. [State machine and schema](#state-machine-and-schema)
-6. [API reference](#api-reference)
-7. [Tracing and observability](#tracing-and-observability)
-8. [Design decisions](#design-decisions)
-9. [Known limitations](#known-limitations)
-10. [Testing](#testing)
-11. [License](#license)
+6. [Limits](#limits)
+7. [API reference](#api-reference)
+8. [Tracing and observability](#tracing-and-observability)
+9. [Design decisions](#design-decisions)
+10. [Known limitations](#known-limitations)
+11. [Testing](#testing)
+12. [License](#license)
 
 ---
 
@@ -59,8 +60,8 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_events = { path = "../rust_events" }  # or git = "..." until published
-pg_work_queue = "0.1"
+rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.1.0" }
+pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.1" }
 sqlx = { version = "=0.8.6", features = ["postgres", "runtime-tokio-rustls", "migrate"] }
 async-trait = "=0.1.83"
 serde = { version = "=1.0.228", features = ["derive"] }
@@ -136,7 +137,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         &mut tx,
         &DispatchContext::new("acme")
             .with_producer_bc("shop")
-            .with_idempotency_key("order:42"),
+            // Idempotency keys are scoped per `tenant_id`, NOT per
+            // (tenant_id, event_type). Reusing "order:42" for a different
+            // DomainEvent in the same tenant would collapse the second
+            // dispatch into the first. Encode any per-type dimension into
+            // the key yourself, e.g. format!("{}:{}", E::EVENT_TYPE, id).
+            .with_idempotency_key("order_created:42"),
         &OrderCreated { order_id: 42, amount: 100 },
     ).await?;
     tx.commit().await?;
@@ -265,7 +271,26 @@ Both `pg_work_queue` and `rust_events` share the `_sqlx_migrations` table. Both 
 
 The migration also checks the PG version at runtime (`current_setting('server_version_num')::int < 180000`) and raises an exception on unsupported versions.
 
-**No initial listing index on `outbox.events`.** Operators add their own index for their query patterns (most common: `(tenant_id, event_type, created_at DESC)`). The initial migration stays write-cheap; the index guidance is here and in the spec.
+**Indexes on `outbox.events` are minimal by design.** The only index is `events_created_at_idx` on `(created_at)`, which `purge_events` requires (it filters and orders by `created_at`, and is a library-owned public API — the cost cannot be left to operators). Listing indexes for application queries (most common: `(tenant_id, event_type, created_at DESC)`) are deliberately left to operators so the initial migration stays write-cheap.
+
+---
+
+## Limits
+
+Public byte limits, enforced both at Rust input-validation time and at DB-level CHECK constraints (defense in depth). All lengths are measured in **bytes**, not Unicode characters. Truncation, where applied, is UTF-8-codepoint-safe — a multi-byte codepoint crossing the boundary is dropped, not split.
+
+| Constant | Value | Field | Error |
+|----------|-------|-------|-------|
+| `MAX_EVENT_TYPE_BYTES`       | 128    | `events.event_type`                  | `DispatchError::EventTypeInvalid` |
+| `MAX_HANDLER_ID_BYTES`       | 128    | registration string                  | `BuildError::HandlerIdTooLong`    |
+| `MAX_TENANT_BYTES`           | 64     | `events.tenant_id`                   | `DispatchError::TenantIdTooLong`  |
+| `MAX_BC_BYTES`               | 64     | `events.producer_bc`                 | `DispatchError::ProducerBcTooLong`|
+| `MAX_IDEMPOTENCY_KEY_BYTES`  | 128    | `dispatch_keys.idempotency_key`      | `DispatchError::IdempotencyKeyInvalid` |
+| `MAX_PAYLOAD_BYTES`          | 1 MiB  | `events.payload` (encoded JSON)      | `DispatchError::PayloadTooLarge`  |
+| `MAX_HEADERS_BYTES`          | 16 KiB | `events.headers` (encoded JSON)      | `DispatchError::HeadersTooLarge`  |
+| `MAX_LAST_ERROR_BYTES`       | 8 KiB  | `handler_deliveries.last_error`      | truncated via `truncate_utf8`     |
+
+`last_error` is additionally sanitized for control characters (NUL → `?`, ANSI escapes, CR/LF, BEL/DEL, C1 range) before storage to avoid Postgres `22021` `TEXT` rejection and ANSI log-injection in operator consoles.
 
 ---
 
@@ -443,7 +468,7 @@ cargo doc --no-deps --open
 
 Tests spin up a PostgreSQL 18 container per test via `testcontainers`. Both migrators run on each container before the test. Test containers are shut down after each test.
 
-**Test scope (~140–170 integration tests):**
+**Test scope (~73 tests across 1 unit binary + 26 integration binaries):**
 
 - Schema invariants: CHECK constraint violations, `deny_update` trigger, FK CASCADE, state machine consistency
 - Dispatch happy paths: with/without idempotency key, multi-handler fanout
