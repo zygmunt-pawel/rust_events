@@ -13,3 +13,6 @@ pub use crate::handler::{DomainEvent, EventHandler, HandlerContext, HandlerError
 
 pub mod dispatch_context;
 pub use crate::dispatch_context::DispatchContext;
+
+pub mod outcome;
+pub use crate::outcome::{DispatchOutcome, OutboxStats};
