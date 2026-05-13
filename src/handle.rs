@@ -16,12 +16,12 @@ pub struct OutboxHandle {
 }
 
 impl OutboxHandle {
-    pub(crate) fn new(inner: pg_work_queue::WorkerHandle, pool: PgPool) -> Self {
+    pub(crate) const fn new(inner: pg_work_queue::WorkerHandle, pool: PgPool) -> Self {
         Self { inner, pool }
     }
 
-    /// Graceful drain with a deadline. Returns pg_work_queue worker stats
-    /// plus a count of still-non-terminal handler_deliveries rows.
+    /// Graceful drain with a deadline. Returns `pg_work_queue` worker stats
+    /// plus a count of still-non-terminal `handler_deliveries` rows.
     ///
     /// # Errors
     ///

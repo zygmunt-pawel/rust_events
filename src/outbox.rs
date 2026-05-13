@@ -3,21 +3,21 @@
 use crate::builder::OutboxConfig;
 use crate::dispatch_context::DispatchContext;
 use crate::envelope::HandlerEnvelope;
-use crate::error::DispatchError;
+use crate::error::{DispatchError, StartError};
+use crate::handle::OutboxHandle;
 use crate::handler::DomainEvent;
 use crate::limits;
 use crate::outcome::DispatchOutcome;
 use crate::registry::Registry;
+use crate::runtime::OutboxRuntime;
 use sqlx::{PgConnection, PgPool};
 use std::sync::Arc;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
 
 /// The transactional outbox runtime. Created via [`crate::builder::OutboxBuilder`].
 pub struct Outbox {
-    #[allow(dead_code)] // used in Phase 8 (start / worker)
     pub(crate) pool: PgPool,
-    #[allow(dead_code)] // used in Phase 8 (start / worker)
     pub(crate) config: OutboxConfig,
     pub(crate) registry: Arc<Registry>,
     pub(crate) allow_no_handlers: bool,
@@ -214,5 +214,46 @@ impl Outbox {
             event_id,
             deliveries: handler_ids.len(),
         })
+    }
+}
+
+impl Outbox {
+    /// First call starts the worker; subsequent calls return
+    /// [`StartError::AlreadyStarted`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`StartError`] if `pg_work_queue`'s Worker build/start fails.
+    pub async fn start(&self) -> Result<OutboxHandle, StartError> {
+        if self.started.swap(true, Ordering::SeqCst) {
+            return Err(StartError::AlreadyStarted);
+        }
+
+        let runtime = Arc::new(OutboxRuntime {
+            pool: self.pool.clone(),
+            config: self.config.clone(),
+            registry: self.registry.clone(),
+        });
+
+        let runtime_for_handler = runtime.clone();
+        let inner = pg_work_queue::Worker::<HandlerEnvelope>::builder()
+            .pool(self.pool.clone())
+            .queue("outbox_handler_deliveries")
+            .poll_interval(self.config.poll_interval)
+            .concurrency(usize::try_from(self.config.concurrency).unwrap_or(usize::MAX))
+            .max_attempts(self.config.max_attempts)
+            .lease_timeout(self.config.lease_timeout)
+            .handler_timeout(self.config.handler_timeout)
+            .retry_backoff(self.config.retry_backoff)
+            .panic_policy(self.config.panic_policy)
+            .handler(move |env: HandlerEnvelope, ctx: pg_work_queue::JobContext| {
+                let runtime = runtime_for_handler.clone();
+                async move { runtime.handle_envelope(env, ctx).await }
+            })
+            .build()?
+            .start()
+            .await?;
+
+        Ok(OutboxHandle::new(inner, self.pool.clone()))
     }
 }

@@ -11,7 +11,6 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use uuid::Uuid;
 
-#[allow(dead_code)] // OutboxRuntime constructed in Phase 8 (Outbox::start)
 pub(crate) struct OutboxRuntime {
     pub(crate) pool: PgPool,
     pub(crate) config: OutboxConfig,
@@ -155,7 +154,6 @@ impl OutboxRuntime {
     /// Performs an atomic fenced CTE transition on `outbox.handler_deliveries`,
     /// dispatches to the registered handler, and transitions the row to its
     /// terminal state (`sent`, `awaiting_retry`, `dead`, or `skipped`).
-    #[allow(dead_code)] // wired in Phase 8 (Outbox::start)
     #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         skip(self, env, ctx),
