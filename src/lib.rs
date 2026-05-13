@@ -1,6 +1,60 @@
-//! Transactional outbox library for Rust services on Postgres.
+//! Transactional outbox for Rust services on Postgres.
 //!
 //! See `docs/superpowers/specs/2026-05-13-rust-events-design.md` for design.
+//!
+//! # Quick start
+//!
+//! ```no_run
+//! use rust_events::{
+//!     DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
+//!     OutboxBuilder,
+//! };
+//! use serde::{Deserialize, Serialize};
+//! use std::time::Duration;
+//!
+//! #[derive(Serialize, Deserialize)]
+//! struct OrderCreated { order_id: i64, amount: i64 }
+//!
+//! impl DomainEvent for OrderCreated {
+//!     const EVENT_TYPE: &'static str = "shop.order_created";
+//! }
+//!
+//! struct Auditor;
+//!
+//! #[async_trait::async_trait]
+//! impl EventHandler<OrderCreated> for Auditor {
+//!     async fn handle(
+//!         &self,
+//!         _event: &OrderCreated,
+//!         _ctx: &HandlerContext,
+//!     ) -> Result<(), HandlerError> {
+//!         Ok(())
+//!     }
+//! }
+//!
+//! # async fn run(pool: sqlx::PgPool) -> Result<(), Box<dyn std::error::Error>> {
+//! pg_work_queue::migrator().run(&pool).await?;
+//! rust_events::migrator().run(&pool).await?;
+//!
+//! let outbox = OutboxBuilder::new(pool.clone())
+//!     .register_handler::<OrderCreated, _>("audit", Auditor)
+//!     .build()?;
+//!
+//! let handle = outbox.start().await?;
+//!
+//! let mut tx = pool.begin().await?;
+//! outbox.dispatch(
+//!     &mut tx,
+//!     &DispatchContext::new("acme")
+//!         .with_producer_bc("shop")
+//!         .with_idempotency_key("order:42"),
+//!     &OrderCreated { order_id: 42, amount: 100 },
+//! ).await?;
+//! tx.commit().await?;
+//!
+//! let (_pgwq_stats, _outbox_stats) = handle.shutdown(Duration::from_secs(10)).await?;
+//! # Ok(()) }
+//! ```
 #![doc(html_root_url = "https://docs.rs/rust_events/0.1.0")]
 
 pub mod limits;
