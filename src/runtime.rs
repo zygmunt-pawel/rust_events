@@ -170,28 +170,20 @@ impl OutboxRuntime {
         env: HandlerEnvelope,
         ctx: pg_work_queue::JobContext,
     ) -> Result<(), pg_work_queue::JobError> {
-        // ① Registry lookup BEFORE touching the audit row.
-        let handler = if let Some(h) = self.registry.lookup(&env.handler_id) {
-            h.clone()
-        } else {
-            if self.config.strict_handler_lookup {
-                tracing::error!(
-                    target: "rust_events.worker.handler_not_registered",
-                    handler_id = %env.handler_id,
-                    "handler not in registry (strict mode) → mark_dead"
-                );
-                self.mark_dead_fenced(
-                    env.event_id,
-                    &env.handler_id,
-                    "handler not in registry (strict mode)",
-                    ctx.lease_token,
-                )
-                .await?;
-                return Err(pg_work_queue::JobError::abort(
-                    "handler not registered (strict mode)",
-                ));
-            }
-            // Loose mode: leave the row untouched, return retry.
+        // ① Registry lookup BEFORE touching the audit row — but ONLY for loose
+        // mode. Loose mode must leave `handler_deliveries` completely untouched
+        // (status stays 'queued', attempts stays 0) when a handler is absent, so
+        // we return early here without executing the CTE.
+        //
+        // Strict mode defers the lookup until AFTER the CTE transition (step ③)
+        // so that the row is already in 'running' state when we call
+        // `mark_dead_fenced` — the status invariant requires the row to be
+        // 'running' before it can be marked 'dead'.
+        if self.registry.lookup(&env.handler_id).is_none()
+            && !self.config.strict_handler_lookup
+        {
+            // Loose mode: leave the row untouched, return retry so pgwq will
+            // redeliver when a replica with the handler comes online.
             tracing::warn!(
                 target: "rust_events.worker.handler_missing",
                 handler_id = %env.handler_id,
@@ -200,7 +192,7 @@ impl OutboxRuntime {
             return Err(pg_work_queue::JobError::retry(
                 "handler not registered in this replica",
             ));
-        };
+        }
 
         // ② Atomic transition + event/dispatch_key fetch via fenced CTE.
         struct Row {
@@ -306,6 +298,31 @@ impl OutboxRuntime {
             }
             (Some(_), true) => { /* normal path */ }
         }
+
+        // ③b Deferred strict-mode registry check. The row is now 'running'
+        //     (CTE updated it in step ②), so mark_dead_fenced's WHERE
+        //     `status='running' AND lease_token=$token` can match.
+        let handler = if let Some(h) = self.registry.lookup(&env.handler_id) {
+            h.clone()
+        } else {
+            // strict_handler_lookup must be true here — loose mode returned
+            // early in step ①.
+            tracing::error!(
+                target: "rust_events.worker.handler_not_registered",
+                handler_id = %env.handler_id,
+                "handler not in registry (strict mode) → mark_dead"
+            );
+            self.mark_dead_fenced(
+                env.event_id,
+                &env.handler_id,
+                "handler not in registry (strict mode)",
+                ctx.lease_token,
+            )
+            .await?;
+            return Err(pg_work_queue::JobError::abort(
+                "handler not registered (strict mode)",
+            ));
+        };
 
         // ④ Build HandlerContext.
         let hctx = HandlerContext {
