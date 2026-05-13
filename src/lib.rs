@@ -24,3 +24,11 @@ pub use crate::error::{
 
 pub(crate) mod envelope;
 pub(crate) mod registry;
+
+pub mod builder;
+pub use crate::builder::{
+    BackoffPolicy, DecodeStrategy, OutboxBuilder, OutboxConfig, OutboxConfigBuilder, PanicPolicy,
+};
+
+pub mod outbox;
+pub use crate::outbox::Outbox;
