@@ -108,3 +108,17 @@ pub struct HandlerContext {
     /// Arbitrary key-value metadata attached at dispatch time.
     pub headers: serde_json::Map<String, serde_json::Value>,
 }
+
+/// User-implementable async handler for a domain event.
+///
+/// Implementations must be `Send + Sync + 'static` (stored in `Arc<dyn ...>`
+/// in the registry). Use `async_trait` macro for dyn-compatibility.
+#[async_trait::async_trait]
+pub trait EventHandler<E: DomainEvent>: Send + Sync + 'static {
+    /// Handle the given event with the provided delivery context.
+    async fn handle(
+        &self,
+        event: &E,
+        ctx: &HandlerContext,
+    ) -> Result<(), HandlerError>;
+}
