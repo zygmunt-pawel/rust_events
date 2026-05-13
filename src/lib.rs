@@ -16,3 +16,8 @@ pub use crate::dispatch_context::DispatchContext;
 
 pub mod outcome;
 pub use crate::outcome::{DispatchOutcome, OutboxStats};
+
+pub mod error;
+pub use crate::error::{
+    BuildError, DispatchError, HistoryError, PurgeError, ShutdownError, StartError,
+};
