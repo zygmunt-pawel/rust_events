@@ -21,3 +21,6 @@ pub mod error;
 pub use crate::error::{
     BuildError, DispatchError, HistoryError, PurgeError, ShutdownError, StartError,
 };
+
+pub(crate) mod envelope;
+pub(crate) mod registry;
