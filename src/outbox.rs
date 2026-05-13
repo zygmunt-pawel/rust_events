@@ -58,6 +58,15 @@ impl Outbox {
     /// to `outbox.events`, fans out to `outbox.handler_deliveries`, and
     /// enqueues one `pg_work_queue` job per handler — all in `tx`.
     ///
+    /// # Transaction discipline
+    ///
+    /// On `Err`, the caller MUST roll back `tx`. Committing despite an `Err`
+    /// return MAY leak `outbox.handler_deliveries` rows in `queued` state
+    /// without corresponding `pg_work_queue` jobs — they will never be
+    /// delivered. The idiomatic Rust pattern is `outbox.dispatch(...).await?;`
+    /// inside a function whose `Result` exit drops `tx` without commit, which
+    /// rolls back automatically.
+    ///
     /// # Errors
     ///
     /// Returns [`DispatchError`] on validation failures, DB errors, or when no
