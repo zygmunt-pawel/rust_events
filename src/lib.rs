@@ -1,0 +1,4 @@
+//! Transactional outbox library for Rust services on Postgres.
+//!
+//! See `docs/superpowers/specs/2026-05-13-rust-events-design.md` for design.
+#![doc(html_root_url = "https://docs.rs/rust_events/0.1.0")]
