@@ -4,5 +4,6 @@
 #![doc(html_root_url = "https://docs.rs/rust_events/0.1.0")]
 
 pub mod limits;
+pub(crate) mod util;
 pub mod migrator;
 pub use crate::migrator::migrator;
