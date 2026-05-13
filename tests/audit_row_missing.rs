@@ -43,8 +43,8 @@ async fn m1_missing_row_aborts_with_audit_missing_tracing() {
         .register_handler::<Ev, _>("h", Trip)
         .build()
         .unwrap();
-    let handle = outbox.start().await.unwrap();
 
+    // Dispatch FIRST (worker not yet running).
     let mut tx = pool.begin().await.unwrap();
     outbox
         .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
@@ -52,34 +52,53 @@ async fn m1_missing_row_aborts_with_audit_missing_tracing() {
         .unwrap();
     tx.commit().await.unwrap();
 
-    // Small delay so dispatch commit is visible to other connections,
-    // then DELETE the row before the worker can claim it. Worker polls every 200ms;
-    // immediate DELETE has a window of ~200ms before claim.
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    sqlx::query("DELETE FROM outbox.handler_deliveries")
+    // Delete the handler_deliveries row BEFORE starting the worker.
+    // The pgwq.jobs row remains → when the worker claims it, handle_envelope
+    // finds no handler_deliveries row → prev_status=NULL → returns Abort
+    // → pgwq marks the job 'dead'.
+    let deleted = sqlx::query("DELETE FROM outbox.handler_deliveries")
         .execute(&pool)
         .await
-        .unwrap();
+        .unwrap()
+        .rows_affected();
+    assert_eq!(deleted, 1, "expected to delete exactly 1 handler_deliveries row");
 
-    // Wait for pgwq job to reach 'dead' (handler returned Abort).
+    // Now start the worker. It polls immediately (tokio::time::interval fires
+    // on first tick), claims the pgwq.jobs row, finds no handler_deliveries →
+    // aborts → pgwq job becomes 'dead'.
+    let handle = outbox.start().await.unwrap();
+
+    // Wait for pgwq job to reach 'dead'.
     for _ in 0..30 {
-        let dead: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM pgwq.jobs WHERE status='dead'")
-                .fetch_one(&pool)
+        let status: Option<String> =
+            sqlx::query_scalar("SELECT status::text FROM pgwq.jobs LIMIT 1")
+                .fetch_optional(&pool)
                 .await
                 .unwrap();
-        if dead == 1 {
+        if status.as_deref() == Some("dead") {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    let dead: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM pgwq.jobs WHERE status='dead'")
+    let job_status: Option<String> =
+        sqlx::query_scalar("SELECT status::text FROM pgwq.jobs LIMIT 1")
+            .fetch_optional(&pool)
+            .await
+            .unwrap();
+    assert_eq!(
+        job_status.as_deref(),
+        Some("dead"),
+        "pgwq job should be dead after audit-missing Abort, got: {job_status:?}"
+    );
+
+    // No handler_deliveries rows should exist (we deleted them and no re-insert happens).
+    let delivery_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries")
             .fetch_one(&pool)
             .await
             .unwrap();
-    assert_eq!(dead, 1, "pgwq job should be dead after audit-missing Abort");
+    assert_eq!(delivery_count, 0, "handler_deliveries should have 0 rows");
 
     let _ = handle.shutdown(Duration::from_secs(2)).await;
 }
