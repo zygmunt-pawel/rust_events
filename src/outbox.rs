@@ -232,26 +232,35 @@ impl Outbox {
     /// First call starts the worker; subsequent calls return
     /// [`StartError::AlreadyStarted`].
     ///
+    /// # Retry semantics
+    ///
+    /// If `start()` returns an `Err` (e.g. a transient DB outage during
+    /// `pg_work_queue::Worker::build` or `start`), the internal `started`
+    /// flag is released via an RAII guard. Callers — including supervising
+    /// restart loops — may call `start()` again to retry.
+    ///
     /// # Intended usage
     ///
     /// `Outbox` is designed for build-once, start-once-per-process semantics.
-    /// Calling `start()` from multiple tasks concurrently on the same `Outbox`
-    /// instance has a TOCTOU window between the `AtomicBool::swap` returning
-    /// `false` and the worker being built — the loser sees `AlreadyStarted`
-    /// but only after the winner has fully constructed its worker. Build one
-    /// `Outbox` per process and call `start()` from a single task.
-    ///
     /// Running multiple `Outbox` instances against the same database (e.g.,
-    /// across replicas) IS supported — `pg_work_queue`'s `FOR UPDATE SKIP LOCKED`
-    /// claim and fencing tokens make concurrent workers safe.
+    /// across replicas) IS supported — `pg_work_queue`'s
+    /// `FOR UPDATE SKIP LOCKED` claim and fencing tokens make concurrent
+    /// workers safe.
     ///
     /// # Errors
     ///
-    /// Returns [`StartError`] if `pg_work_queue`'s Worker build/start fails.
+    /// Returns [`StartError`] if `pg_work_queue`'s Worker build/start fails,
+    /// or [`StartError::AlreadyStarted`] when a previous `start()` succeeded.
     pub async fn start(&self) -> Result<OutboxHandle, StartError> {
         if self.started.swap(true, Ordering::SeqCst) {
             return Err(StartError::AlreadyStarted);
         }
+
+        // RAII: if any `?` below unwinds the stack, drop releases `started`
+        // so the caller (or a supervising restart loop) can retry. On
+        // success we `disarm()` and `started` stays `true` for the
+        // process lifetime.
+        let mut guard = StartedGuard::new(&self.started);
 
         let runtime = Arc::new(OutboxRuntime {
             pool: self.pool.clone(),
@@ -278,6 +287,32 @@ impl Outbox {
             .start()
             .await?;
 
+        guard.disarm();
         Ok(OutboxHandle::new(inner, self.pool.clone()))
+    }
+}
+
+/// RAII guard that releases [`Outbox::started`] to `false` on Drop unless
+/// explicitly disarmed before the success path. Used in [`Outbox::start`] to
+/// keep the flag honest under fallible Worker build/start.
+struct StartedGuard<'a> {
+    flag: &'a AtomicBool,
+    armed: bool,
+}
+
+impl<'a> StartedGuard<'a> {
+    const fn new(flag: &'a AtomicBool) -> Self {
+        Self { flag, armed: true }
+    }
+    const fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for StartedGuard<'_> {
+    fn drop(&mut self) {
+        if self.armed {
+            self.flag.store(false, Ordering::SeqCst);
+        }
     }
 }
