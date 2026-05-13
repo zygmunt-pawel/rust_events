@@ -24,6 +24,7 @@ pub use crate::error::{
 
 pub(crate) mod envelope;
 pub(crate) mod registry;
+pub(crate) mod runtime;
 
 pub mod builder;
 pub use crate::builder::{
