@@ -86,7 +86,7 @@ pg_work_queue::Worker (poll loop, FOR UPDATE SKIP LOCKED) ──► OutboxRuntim
 
 ## Conventions to preserve
 
-- **Byte limits, not char limits.** All length constraints (event_type, tenant_id, producer_bc, payload, last_error) are measured in bytes, both in Rust (`limits.rs`) and in SQL (`octet_length(...)` CHECKs). Match this when adding new bounded fields.
+- **Byte limits, not char limits.** All length constraints (event_type, tenant_id, producer_bc, idempotency_key, aggregate_key, payload, headers, last_error) are measured in bytes, both in Rust (`limits.rs`) and in SQL (`octet_length(...)` CHECKs). Match this when adding new bounded fields.
 - **UTF-8-safe truncation.** Use `util::truncate_utf8`, never naive byte slicing — the `rust-safe-string-truncation` skill applies. Truncation is used to bound `last_error` before it lands in the DB.
 - **Redact `sqlx::Error` before persisting.** `util::redact_db_error` strips connection details. Apply when an error string is going into `pgwq.jobs.last_error` or `outbox.handler_deliveries.last_error`.
 - **Fenced UPDATEs are non-negotiable.** Every mutation of `handler_deliveries` after the initial claim must include `WHERE lease_token = $stamped_token`. `rows_affected=0` ⇒ stale worker — emit `rust_events.audit.fenced_out` and return `Ok`. See `runtime.rs::mark_*_fenced`.

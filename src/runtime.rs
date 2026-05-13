@@ -193,10 +193,34 @@ impl OutboxRuntime {
         if self.registry.lookup(&env.handler_id).is_none()
             && !self.config.strict_handler_lookup
         {
-            // Loose mode: leave the row untouched, return retry so pgwq will
-            // redeliver when a replica with the handler comes online.
+            // Loose mode: status stays 'queued', attempts stays 0, lease_token
+            // stays NULL so another replica can still claim — we only bump the
+            // orthogonal `resolve_attempts` counter so operators can detect
+            // never-deployed handlers via a single SELECT instead of relying
+            // on tracing-log retention. Best-effort: if the UPDATE fails we
+            // still return retry, the counter will catch up on the next claim.
+            let bumped = sqlx::query(
+                "UPDATE outbox.handler_deliveries
+                    SET resolve_attempts = resolve_attempts + 1,
+                        last_resolve_attempt_at = now()
+                  WHERE event_id = $1 AND handler_id = $2 AND status = 'queued'",
+            )
+            .bind(env.event_id)
+            .bind(&env.handler_id)
+            .execute(&self.pool)
+            .await;
+            if let Err(e) = &bumped {
+                tracing::warn!(
+                    target: "rust_events.worker.resolve_bump_failed",
+                    event_id = %env.event_id,
+                    handler_id = %env.handler_id,
+                    error = %crate::util::redact_db_error(e),
+                    "loose-mode resolve_attempts UPDATE failed; continuing"
+                );
+            }
             tracing::warn!(
                 target: "rust_events.worker.handler_missing",
+                event_id = %env.event_id,
                 handler_id = %env.handler_id,
                 "handler not in this replica's registry; retrying"
             );

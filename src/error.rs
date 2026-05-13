@@ -76,6 +76,17 @@ pub enum DispatchError {
         max: usize,
     },
 
+    /// `DomainEvent::aggregate_key()` returned `Some("")` or a value longer
+    /// than the allowed maximum. `None` is always valid (means "no aggregate
+    /// scope").
+    #[error("aggregate_key length {len} bytes not in 1..={max}")]
+    AggregateKeyInvalid {
+        /// Actual byte length (0 means empty).
+        len: usize,
+        /// Maximum allowed byte length.
+        max: usize,
+    },
+
     /// Encoded event payload exceeds the maximum allowed size.
     #[error("encoded payload size {size} exceeds max {max}")]
     PayloadTooLarge {

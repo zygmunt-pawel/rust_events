@@ -11,6 +11,9 @@ pub const MAX_TENANT_BYTES: usize = 64;
 pub const MAX_BC_BYTES: usize = 64;
 /// Max byte length of `idempotency_key` (per dispatch).
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
+/// Max byte length of `aggregate_key`. Same shape as `idempotency_key`:
+/// a business-key string; `None` means no aggregate scope.
+pub const MAX_AGGREGATE_KEY_BYTES: usize = 128;
 /// Max encoded payload size — matches `pg_work_queue::MAX_PAYLOAD_BYTES`.
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
 /// Max byte length of serialized headers JSON. Defense in depth vs.

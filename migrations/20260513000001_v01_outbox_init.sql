@@ -17,26 +17,33 @@ CREATE FUNCTION outbox.deny_update() RETURNS TRIGGER LANGUAGE plpgsql AS $$
 -- (1) outbox.events — Type B1, immutable.
 -- ============================================================================
 CREATE TABLE outbox.events (
-    id           UUID        PRIMARY KEY,
-    event_type   TEXT        COLLATE "C" NOT NULL,
-    producer_bc  TEXT        COLLATE "C" NOT NULL DEFAULT '',
-    tenant_id    TEXT        COLLATE "C" NOT NULL DEFAULT '',
-    payload      BYTEA       NOT NULL,
-    headers      JSONB       NOT NULL DEFAULT '{}'::jsonb,
-    created_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+    id            UUID        PRIMARY KEY,
+    event_type    TEXT        COLLATE "C" NOT NULL,
+    producer_bc   TEXT        COLLATE "C" NOT NULL DEFAULT '',
+    tenant_id     TEXT        COLLATE "C" NOT NULL DEFAULT '',
+    -- Optional business-aggregate identifier. NULL = no aggregate scope
+    -- (the default for DomainEvent::aggregate_key()). When set, lets
+    -- operators answer "all events for order/customer/account X" with
+    -- a single partial-index probe.
+    aggregate_key TEXT        COLLATE "C" NULL,
+    payload       BYTEA       NOT NULL,
+    headers       JSONB       NOT NULL DEFAULT '{}'::jsonb,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     -- Byte limits everywhere (not character length) — storage-bound, predictable
     -- across multi-byte UTF-8 inputs. Rust validates input.len() (bytes) too.
-    CONSTRAINT events_event_type_bytes   CHECK (octet_length(event_type) BETWEEN 1 AND 128),
-    CONSTRAINT events_producer_bc_bytes  CHECK (octet_length(producer_bc) <= 64),
-    CONSTRAINT events_tenant_id_bytes    CHECK (octet_length(tenant_id) <= 64),
-    CONSTRAINT events_payload_size       CHECK (octet_length(payload) <= 1048576),
-    CONSTRAINT events_headers_object     CHECK (jsonb_typeof(headers) = 'object'),
+    CONSTRAINT events_event_type_bytes    CHECK (octet_length(event_type) BETWEEN 1 AND 128),
+    CONSTRAINT events_producer_bc_bytes   CHECK (octet_length(producer_bc) <= 64),
+    CONSTRAINT events_tenant_id_bytes     CHECK (octet_length(tenant_id) <= 64),
+    CONSTRAINT events_aggregate_key_bytes CHECK (aggregate_key IS NULL
+                                                 OR octet_length(aggregate_key) BETWEEN 1 AND 128),
+    CONSTRAINT events_payload_size        CHECK (octet_length(payload) <= 1048576),
+    CONSTRAINT events_headers_object      CHECK (jsonb_typeof(headers) = 'object'),
     -- Bound headers JSON length to match limits::MAX_HEADERS_BYTES on the
     -- Rust side. octet_length(headers::text) measures the serialized form;
     -- jsonb internal storage may be smaller, but the wire/Rust view is
     -- what callers reason about.
-    CONSTRAINT events_headers_size       CHECK (octet_length(headers::text) <= 16384)
+    CONSTRAINT events_headers_size        CHECK (octet_length(headers::text) <= 16384)
 );
 
 -- No listing index in initial migration. Operators add their own for their query
@@ -48,6 +55,13 @@ CREATE TABLE outbox.events (
 -- since purge_events is a public API, the cost is library-owned, not
 -- operator-tunable.
 CREATE INDEX events_created_at_idx ON outbox.events (created_at);
+
+-- Partial index supporting "all events for aggregate X under tenant T".
+-- Partial WHERE aggregate_key IS NOT NULL keeps the index empty (zero cost)
+-- for callers that never set DomainEvent::aggregate_key().
+CREATE INDEX events_aggregate_key_idx
+    ON outbox.events (tenant_id, aggregate_key, created_at DESC)
+    WHERE aggregate_key IS NOT NULL;
 
 CREATE TRIGGER deny_update_events
     BEFORE UPDATE ON outbox.events
@@ -93,27 +107,36 @@ CREATE TYPE outbox.delivery_status AS ENUM (
 );
 
 CREATE TABLE outbox.handler_deliveries (
-    id                 BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-    event_id           UUID        NOT NULL REFERENCES outbox.events(id) ON DELETE CASCADE,
-    handler_id         TEXT        COLLATE "C" NOT NULL,
-    status             outbox.delivery_status NOT NULL DEFAULT 'queued',
-    attempts           INTEGER     NOT NULL DEFAULT 0,
-    last_error         TEXT,
+    id                      BIGINT      GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+    event_id                UUID        NOT NULL REFERENCES outbox.events(id) ON DELETE CASCADE,
+    handler_id              TEXT        COLLATE "C" NOT NULL,
+    status                  outbox.delivery_status NOT NULL DEFAULT 'queued',
+    attempts                INTEGER     NOT NULL DEFAULT 0,
+    -- Loose-mode handler-lookup counter. Bumped each time a worker claims a
+    -- job whose handler_id is not in its in-memory registry (loose mode only;
+    -- strict mode dead-letters and never touches this column). Operators can
+    -- alert on rows where resolve_attempts > N to detect undeployed handlers
+    -- without depending on tracing-level retention.
+    resolve_attempts        INTEGER     NOT NULL DEFAULT 0,
+    last_resolve_attempt_at TIMESTAMPTZ,
+    last_error              TEXT,
     -- Fencing token: NULL when not running, set to JobContext.lease_token while
     -- in 'running'. Cleared on every transition out of 'running'. All mark_*
     -- helpers WHERE lease_token = $token; mismatched (stale-worker) UPDATE
     -- returns rows_affected=0 and the wrapper emits fenced_out tracing.
-    lease_token        UUID,
-    first_attempted_at TIMESTAMPTZ,
-    last_attempted_at  TIMESTAMPTZ,
-    finished_at        TIMESTAMPTZ,
-    created_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
-    updated_at         TIMESTAMPTZ NOT NULL DEFAULT now(),
+    lease_token             UUID,
+    first_attempted_at      TIMESTAMPTZ,
+    last_attempted_at       TIMESTAMPTZ,
+    finished_at             TIMESTAMPTZ,
+    created_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at              TIMESTAMPTZ NOT NULL DEFAULT now(),
 
     CONSTRAINT handler_deliveries_handler_bytes
         CHECK (octet_length(handler_id) BETWEEN 1 AND 128),
     CONSTRAINT handler_deliveries_attempts_nonneg
         CHECK (attempts >= 0),
+    CONSTRAINT handler_deliveries_resolve_attempts_nonneg
+        CHECK (resolve_attempts >= 0),
     CONSTRAINT handler_deliveries_last_error_bytes
         CHECK (last_error IS NULL OR octet_length(last_error) <= 8192),
     CONSTRAINT handler_deliveries_temporal CHECK (

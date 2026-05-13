@@ -13,6 +13,7 @@ pub struct History<'a> {
 
 /// A persisted event record from `outbox.events`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct EventRecord {
     /// The event UUID.
     pub id: Uuid,
@@ -22,6 +23,10 @@ pub struct EventRecord {
     pub producer_bc: String,
     /// The tenant this event belongs to.
     pub tenant_id: String,
+    /// Business-aggregate identifier, if the dispatching event opted in via
+    /// `DomainEvent::aggregate_key()`. `None` for events without aggregate
+    /// scoping (the default).
+    pub aggregate_key: Option<String>,
     /// Raw JSON-encoded payload bytes.
     pub payload: Vec<u8>,
     /// Optional headers stored with the event.
@@ -53,6 +58,22 @@ pub struct HandlerDeliveryRecord {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
+/// One row returned by [`History::stuck_unregistered_handlers`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct StuckHandlerRow {
+    /// Event awaiting a handler.
+    pub event_id: Uuid,
+    /// Handler ID that no replica recognized.
+    pub handler_id: String,
+    /// Number of times a worker has claimed-and-retried this row in loose
+    /// mode (incremented per loose miss; never reset).
+    pub resolve_attempts: u32,
+    /// Most recent timestamp at which a worker bumped `resolve_attempts`.
+    /// `None` only on legacy rows with a default of 0 attempts.
+    pub last_resolve_attempt_at: Option<DateTime<Utc>>,
+}
+
 /// Delivery status of a handler delivery row.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, sqlx::Type)]
 #[sqlx(type_name = "outbox.delivery_status", rename_all = "snake_case")]
@@ -80,9 +101,19 @@ impl History<'_> {
     /// Returns [`HistoryError`] on database errors.
     #[tracing::instrument(skip(self), target = "rust_events.history")]
     pub async fn event(&self, event_id: Uuid) -> Result<Option<EventRecord>, HistoryError> {
-        type EventRow = (Uuid, String, String, String, Vec<u8>, serde_json::Value, DateTime<Utc>);
+        type EventRow = (
+            Uuid,
+            String,
+            String,
+            String,
+            Option<String>,
+            Vec<u8>,
+            serde_json::Value,
+            DateTime<Utc>,
+        );
         let row: Option<EventRow> = sqlx::query_as(
-                "SELECT id, event_type, producer_bc, tenant_id, payload, headers, created_at
+                "SELECT id, event_type, producer_bc, tenant_id, aggregate_key,
+                        payload, headers, created_at
                  FROM outbox.events
                  WHERE id = $1",
             )
@@ -90,21 +121,67 @@ impl History<'_> {
             .fetch_optional(self.pool)
             .await?;
 
-        Ok(row.map(|(id, event_type, producer_bc, tenant_id, payload, headers_val, created_at)| {
-            let headers = match headers_val {
-                serde_json::Value::Object(m) => m,
-                _ => serde_json::Map::new(),
-            };
-            EventRecord {
-                id,
-                event_type,
-                producer_bc,
-                tenant_id,
-                payload,
-                headers,
-                created_at,
-            }
-        }))
+        Ok(row.map(
+            |(id, event_type, producer_bc, tenant_id, aggregate_key, payload, headers_val, created_at)| {
+                let headers = match headers_val {
+                    serde_json::Value::Object(m) => m,
+                    _ => serde_json::Map::new(),
+                };
+                EventRecord {
+                    id,
+                    event_type,
+                    producer_bc,
+                    tenant_id,
+                    aggregate_key,
+                    payload,
+                    headers,
+                    created_at,
+                }
+            },
+        ))
+    }
+
+    /// Surface deliveries stuck in loose-mode handler-lookup retries.
+    ///
+    /// Returns one row per `(event_id, handler_id)` whose
+    /// `resolve_attempts >= threshold` and whose status is still `'queued'`
+    /// (i.e. no worker has yet found a registered handler and started the
+    /// row). Operators can poll this on a schedule as a single-query
+    /// diagnostic for "this handler was never deployed."
+    ///
+    /// Ordered by `last_resolve_attempt_at DESC` so the most recent
+    /// flapping rows come first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`HistoryError`] on database errors.
+    #[tracing::instrument(skip(self), target = "rust_events.history")]
+    pub async fn stuck_unregistered_handlers(
+        &self,
+        threshold: u32,
+    ) -> Result<Vec<StuckHandlerRow>, HistoryError> {
+        type StuckRow = (Uuid, String, i32, Option<DateTime<Utc>>);
+        let threshold_i32 = i32::try_from(threshold).unwrap_or(i32::MAX);
+        let rows: Vec<StuckRow> = sqlx::query_as(
+            "SELECT event_id, handler_id, resolve_attempts, last_resolve_attempt_at
+             FROM outbox.handler_deliveries
+             WHERE status = 'queued'
+               AND resolve_attempts >= $1
+             ORDER BY last_resolve_attempt_at DESC NULLS LAST",
+        )
+        .bind(threshold_i32)
+        .fetch_all(self.pool)
+        .await?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(event_id, handler_id, ra, last)| StuckHandlerRow {
+                event_id,
+                handler_id,
+                resolve_attempts: u32::try_from(ra).unwrap_or(0),
+                last_resolve_attempt_at: last,
+            })
+            .collect())
     }
 
     /// Fetch all handler deliveries for an event, ordered by `handler_id` ASC.

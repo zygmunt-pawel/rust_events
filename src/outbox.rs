@@ -115,6 +115,15 @@ impl Outbox {
                 max: limits::MAX_IDEMPOTENCY_KEY_BYTES,
             });
         }
+        let aggregate_key = event.aggregate_key();
+        if let Some(ref ak) = aggregate_key
+            && (ak.is_empty() || ak.len() > limits::MAX_AGGREGATE_KEY_BYTES)
+        {
+            return Err(DispatchError::AggregateKeyInvalid {
+                len: ak.len(),
+                max: limits::MAX_AGGREGATE_KEY_BYTES,
+            });
+        }
 
         // 2. Encode payload + payload-size check.
         let payload = serde_json::to_vec(event).map_err(DispatchError::Codec)?;
@@ -184,13 +193,14 @@ impl Outbox {
         }
         sqlx::query(
             "INSERT INTO outbox.events
-                (id, event_type, producer_bc, tenant_id, payload, headers)
-             VALUES ($1, $2, $3, $4, $5, $6)",
+                (id, event_type, producer_bc, tenant_id, aggregate_key, payload, headers)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)",
         )
         .bind(event_id)
         .bind(E::EVENT_TYPE)
         .bind(ctx.producer_bc())
         .bind(ctx.tenant_id())
+        .bind(aggregate_key.as_deref())
         .bind(&payload)
         .bind(headers_json)
         .execute(&mut *tx)

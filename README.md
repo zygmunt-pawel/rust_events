@@ -83,6 +83,13 @@ impl DomainEvent for OrderCreated {
     // This string is the stable wire name. It must not change after events are
     // in flight; renaming a Rust module or struct won't break dispatch.
     const EVENT_TYPE: &'static str = "shop.order_created";
+
+    // Optional: a business aggregate identifier. Default returns `None`. When
+    // set, lets you ask "all events for this order" via the partial index
+    // `(tenant_id, aggregate_key, created_at DESC) WHERE aggregate_key IS NOT NULL`.
+    fn aggregate_key(&self) -> Option<std::borrow::Cow<'_, str>> {
+        Some(std::borrow::Cow::Owned(format!("order:{}", self.order_id)))
+    }
 }
 ```
 
@@ -286,6 +293,7 @@ Public byte limits, enforced both at Rust input-validation time and at DB-level 
 | `MAX_TENANT_BYTES`           | 64     | `events.tenant_id`                   | `DispatchError::TenantIdTooLong`  |
 | `MAX_BC_BYTES`               | 64     | `events.producer_bc`                 | `DispatchError::ProducerBcTooLong`|
 | `MAX_IDEMPOTENCY_KEY_BYTES`  | 128    | `dispatch_keys.idempotency_key`      | `DispatchError::IdempotencyKeyInvalid` |
+| `MAX_AGGREGATE_KEY_BYTES`    | 128    | `events.aggregate_key`               | `DispatchError::AggregateKeyInvalid` |
 | `MAX_PAYLOAD_BYTES`          | 1 MiB  | `events.payload` (encoded JSON)      | `DispatchError::PayloadTooLarge`  |
 | `MAX_HEADERS_BYTES`          | 16 KiB | `events.headers` (encoded JSON)      | `DispatchError::HeadersTooLarge`  |
 | `MAX_LAST_ERROR_BYTES`       | 8 KiB  | `handler_deliveries.last_error`      | truncated via `truncate_utf8`     |
@@ -334,6 +342,11 @@ let handle = outbox.start().await?;
 // Query delivery history:
 let record = outbox.history().event(event_id).await?;
 let deliveries = outbox.history().handler_deliveries_for(event_id).await?;
+
+// Operator-diagnostic: find deliveries stuck on loose-mode handler-lookup
+// retries (resolve_attempts ≥ threshold, status still 'queued'). Useful to
+// alert on "this handler was never deployed" without depending on tracing.
+let stuck = outbox.history().stuck_unregistered_handlers(5).await?;
 ```
 
 `start()` is guarded: calling it a second time on the same `Outbox` returns `Err(StartError::AlreadyStarted)`. Multiple processes each calling `start()` is fine; `pg_work_queue` handles concurrent claims with `FOR UPDATE SKIP LOCKED`.
@@ -354,9 +367,12 @@ match outcome {
 // From inside a handler:
 return Err(HandlerError::retry("transient upstream error"));
 return Err(HandlerError::retry_in("rate limited", Duration::from_secs(60)));
+return Err(HandlerError::retry_at("after window", reset_at));  // chrono::DateTime<Utc>
 return Err(HandlerError::skip("feature flag off for this tenant"));
 return Err(HandlerError::abort("permanent domain error — do not retry"));
 ```
+
+`retry_at` converts the wall-clock distance from now to `when` into the backoff override; a past timestamp becomes `Duration::ZERO` (retry immediately).
 
 `Skip` is a distinct terminal state (`status='skipped'`) — not a lying success, not a lying failure. Use it for "this event does not apply to me."
 
@@ -402,6 +418,15 @@ All instrumentation is via `tracing`. No metrics endpoint. Build a `tracing::Lay
 
 **Common span fields:** `event_id`, `event_type`, `handler_id`, `tenant_id`, `producer_bc`, `attempt`, `max_attempts`, `idempotency_key_set` (bool, not the value), `outcome`, `deliveries`, `prev_status`.
 
+**Observability contract.** The span-field names and types listed above are part of the public API and follow SemVer:
+
+- **Removing or renaming** a field is a **major** bump.
+- **Adding** a new field is a **minor** bump.
+- Field **types** (`Uuid`, `&str`, `u32`, `bool`) will not change without a **major** bump.
+- Target names (`rust_events.<area>.<kind>`) follow the same rules.
+
+External tracing layers (Prometheus exporters, OTLP pipelines) and alerting rules can be authored against this contract without breaking on patch / minor releases.
+
 ---
 
 ## Design decisions
@@ -436,7 +461,7 @@ Both pgwq mechanisms cancel / flip `pgwq.jobs` *without* calling our handler clo
 
 4. **Minor status drift between `pgwq.jobs` and `handler_deliveries` after a crash.** If a worker crashes between `mark_dead_fenced` and `pg_work_queue`'s own `mark_done`, the reaper re-queues the job. The next worker sees `handler_deliveries.status='dead'` (terminal), returns `Ok`, and `pg_work_queue` marks the job done. The `pgwq.jobs` row ends up `done` while our row is `dead`. Both are terminal; the at-least-once contract is satisfied. The reverse (pgwq `dead`, our `sent`) is prevented by fencing.
 
-5. **Loose handler-lookup mode silently retries on missing registry entries.** If a new handler is never deployed, jobs exhaust `max_attempts` and become dead in `pg_work_queue`. Detection: `handler_deliveries` rows stuck at `queued` with low `attempts` and `last_attempted_at` from recent worker ticks. Switch to `strict_handler_lookup=true` once the deploy is stable, or alert on `rust_events.worker.handler_missing` tracing events.
+5. **Loose handler-lookup mode retries on missing registry entries.** If a new handler is never deployed, jobs exhaust `max_attempts` and become dead in `pg_work_queue`. Detection: poll `History::stuck_unregistered_handlers(threshold)` on a schedule — it returns `(event_id, handler_id, resolve_attempts, last_resolve_attempt_at)` for every row with `status='queued'` AND `resolve_attempts >= threshold`. The counter is bumped on every loose-mode worker claim, so the SELECT is a single-query diagnostic independent of tracing retention. Switch to `strict_handler_lookup=true` once the deploy is stable, or also alert on the `rust_events.worker.handler_missing` tracing event.
 
 6. **`HandlerError::{Retry,Skip,Abort}::reason` is durable and operator-visible.** Reason strings are persisted in `outbox.handler_deliveries.last_error` AND `pgwq.jobs.last_error`, and surface in operator logs and tracing. Do NOT format payload values, user PII (emails, names, tokens), or other sensitive data into the reason. Prefer enum-like categories — `"upstream_5xx"`, `"rate_limited"`, `"feature_flag_off"`. For detail, use `tracing::error!()` from inside the handler instead; tracing has its own retention policy distinct from the audit columns. Reason strings are sanitized for control characters and ANSI escapes (NUL → `?`, etc.) before storage and truncated to 8 KiB.
 

@@ -1,5 +1,7 @@
 //! Public traits and types for domain events and handlers.
 
+use chrono::{DateTime, Utc};
+use std::borrow::Cow;
 use std::time::Duration;
 use uuid::Uuid;
 
@@ -15,6 +17,22 @@ pub trait DomainEvent:
     /// Stable wire-name. Convention: `"<bc>.<event_name>"`,
     /// e.g. `"shop.order_created"`.
     const EVENT_TYPE: &'static str;
+
+    /// Optional business-aggregate identifier for this event.
+    ///
+    /// Returned value is stored in `outbox.events.aggregate_key` and indexed
+    /// (partial, `WHERE aggregate_key IS NOT NULL`) under
+    /// `(tenant_id, aggregate_key, created_at DESC)`. Use for "all events
+    /// for order/customer/account X" lookups.
+    ///
+    /// Default returns `None` — zero overhead for callers that don't need
+    /// aggregate scoping (the partial index stays empty).
+    ///
+    /// Must be ≤ [`crate::limits::MAX_AGGREGATE_KEY_BYTES`] bytes (128).
+    /// Empty string is rejected at dispatch time.
+    fn aggregate_key(&self) -> Option<Cow<'_, str>> {
+        None
+    }
 }
 
 /// Handler outcome. Mirror of `pg_work_queue::JobError` plus `Skip` for the
@@ -60,6 +78,24 @@ impl HandlerError {
         Self::Retry {
             reason: reason.into(),
             retry_in: Some(retry_in),
+        }
+    }
+
+    /// Construct a `Retry` whose delay is the wall-clock distance from now
+    /// to `when`. A timestamp in the past (or exactly now) becomes
+    /// `Duration::ZERO` — retry immediately rather than panic on negative
+    /// conversion.
+    ///
+    /// Useful when the handler knows when retrying *will* succeed (e.g. a
+    /// `Retry-After` header from a 429, a scheduled-window restart, a
+    /// rate-limit reset).
+    pub fn retry_at(reason: impl Into<String>, when: DateTime<Utc>) -> Self {
+        let delay = (when - Utc::now())
+            .to_std()
+            .unwrap_or(Duration::ZERO);
+        Self::Retry {
+            reason: reason.into(),
+            retry_in: Some(delay),
         }
     }
 
@@ -121,4 +157,44 @@ pub trait EventHandler<E: DomainEvent>: Send + Sync + 'static {
         event: &E,
         ctx: &HandlerContext,
     ) -> Result<(), HandlerError>;
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn retry_at_future_yields_positive_delay() {
+        let when = Utc::now() + chrono::Duration::seconds(30);
+        let HandlerError::Retry { retry_in, .. } = HandlerError::retry_at("after window", when)
+        else {
+            panic!("expected Retry");
+        };
+        let delay = retry_in.expect("retry_at must set retry_in");
+        assert!(
+            delay >= Duration::from_secs(28) && delay <= Duration::from_secs(31),
+            "expected ~30s delay, got {delay:?}"
+        );
+    }
+
+    #[test]
+    fn retry_at_past_yields_zero_delay() {
+        let when = Utc::now() - chrono::Duration::seconds(10);
+        let HandlerError::Retry { retry_in, .. } = HandlerError::retry_at("late", when)
+        else {
+            panic!("expected Retry");
+        };
+        assert_eq!(retry_in, Some(Duration::ZERO));
+    }
+
+    #[test]
+    fn retry_at_carries_reason() {
+        let HandlerError::Retry { reason, .. } =
+            HandlerError::retry_at("rate_limited", Utc::now())
+        else {
+            panic!("expected Retry");
+        };
+        assert_eq!(reason, "rate_limited");
+    }
 }
