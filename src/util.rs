@@ -34,6 +34,29 @@ pub fn is_pg_constraint_violation(e: &sqlx::Error) -> bool {
     }
 }
 
+/// Format a [`sqlx::Error`] for inclusion in `pg_work_queue::JobError` messages
+/// (which land in `pgwq.jobs.last_error` and operator logs). Strips Postgres
+/// DETAIL lines so user-supplied PII (e.g. values of unique-constraint columns
+/// like `idempotency_key`, `tenant_id`) cannot leak via fenced/transient error
+/// paths. Pairs with [`is_pg_constraint_violation`] — same SQLSTATE classification.
+#[allow(dead_code)]
+pub fn redact_db_error(e: &sqlx::Error) -> String {
+    match e {
+        sqlx::Error::Database(db) => {
+            let code = db.code();
+            let code = code.as_deref().unwrap_or("unknown");
+            format!("db_error code={code}")
+        }
+        sqlx::Error::Io(_) => "db_error kind=io".into(),
+        sqlx::Error::PoolTimedOut => "db_error kind=pool_timed_out".into(),
+        sqlx::Error::PoolClosed => "db_error kind=pool_closed".into(),
+        sqlx::Error::RowNotFound => "db_error kind=row_not_found".into(),
+        sqlx::Error::Tls(_) => "db_error kind=tls".into(),
+        sqlx::Error::Configuration(_) => "db_error kind=configuration".into(),
+        _ => "db_error kind=other".into(),
+    }
+}
+
 /// Convert a `serde_json::Value` into a header `Map`. Non-object inputs
 /// (arrays, scalars, null) collapse to an empty map — the DB CHECK on
 /// `outbox.events.headers` should prevent these reaching us, but defense
@@ -98,5 +121,36 @@ mod tests {
         let v = serde_json::json!([1, 2, 3]);
         let m = parse_headers(v);
         assert!(m.is_empty());
+    }
+
+    #[test]
+    fn redact_db_error_pool_closed() {
+        let msg = redact_db_error(&sqlx::Error::PoolClosed);
+        assert_eq!(msg, "db_error kind=pool_closed");
+    }
+
+    #[test]
+    fn redact_db_error_pool_timed_out() {
+        let msg = redact_db_error(&sqlx::Error::PoolTimedOut);
+        assert_eq!(msg, "db_error kind=pool_timed_out");
+    }
+
+    #[test]
+    fn redact_db_error_row_not_found() {
+        let msg = redact_db_error(&sqlx::Error::RowNotFound);
+        assert_eq!(msg, "db_error kind=row_not_found");
+    }
+
+    #[test]
+    fn redact_db_error_starts_with_prefix() {
+        // Operators rely on the "db_error " prefix to distinguish redacted-DB-errors
+        // from handler-emitted reasons in pgwq.jobs.last_error.
+        for e in [
+            sqlx::Error::PoolClosed,
+            sqlx::Error::PoolTimedOut,
+            sqlx::Error::RowNotFound,
+        ] {
+            assert!(redact_db_error(&e).starts_with("db_error "));
+        }
     }
 }

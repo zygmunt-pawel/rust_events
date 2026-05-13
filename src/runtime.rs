@@ -5,7 +5,7 @@
 
 use crate::builder::OutboxConfig;
 use crate::registry::{HandlerOutcome, Registry};
-use crate::util::truncate_utf8;
+use crate::util::{redact_db_error, truncate_utf8};
 use crate::limits;
 use sqlx::PgPool;
 use std::sync::Arc;
@@ -37,7 +37,7 @@ impl OutboxRuntime {
         .bind(lease_token)
         .execute(&self.pool)
         .await
-        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_sent: {e}")))?;
+        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_sent: {}", redact_db_error(&e))))?;
         log_fenced_out("sent", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -63,7 +63,7 @@ impl OutboxRuntime {
         .bind(trimmed)
         .execute(&self.pool)
         .await
-        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_retry: {e}")))?;
+        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_retry: {}", redact_db_error(&e))))?;
         log_fenced_out("awaiting_retry", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -89,7 +89,7 @@ impl OutboxRuntime {
         .bind(trimmed)
         .execute(&self.pool)
         .await
-        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_dead: {e}")))?;
+        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_dead: {}", redact_db_error(&e))))?;
         log_fenced_out("dead", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -115,7 +115,7 @@ impl OutboxRuntime {
         .bind(trimmed)
         .execute(&self.pool)
         .await
-        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_skipped: {e}")))?;
+        .map_err(|e| pg_work_queue::JobError::retry(format!("mark_skipped: {}", redact_db_error(&e))))?;
         log_fenced_out("skipped", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -427,8 +427,11 @@ impl OutboxRuntime {
 /// a data invariant was broken; all other errors are transient (`retry`).
 fn map_sql(e: &sqlx::Error, ctx: &str) -> pg_work_queue::JobError {
     if is_pg_constraint_violation(e) {
-        pg_work_queue::JobError::abort(format!("{ctx}: constraint violation: {e}"))
+        pg_work_queue::JobError::abort(format!(
+            "{ctx}: constraint violation: {}",
+            redact_db_error(e)
+        ))
     } else {
-        pg_work_queue::JobError::retry(format!("{ctx}: {e}"))
+        pg_work_queue::JobError::retry(format!("{ctx}: {}", redact_db_error(e)))
     }
 }
