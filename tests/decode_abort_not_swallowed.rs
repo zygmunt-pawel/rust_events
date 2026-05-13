@@ -22,7 +22,7 @@ impl DomainEvent for DecodeRequest {
 
 /// Handler that legitimately returns Abort with reason starting with "decode ".
 /// Pre-fix: runtime.rs:345-355 silently converts this to Retry. The test fails
-/// because attempts climbs and last_error never lands as permanent.
+/// because attempts climbs and `last_error` never lands as permanent.
 struct AbortingHandler;
 #[async_trait::async_trait]
 impl EventHandler<DecodeRequest> for AbortingHandler {
@@ -37,7 +37,7 @@ impl EventHandler<DecodeRequest> for AbortingHandler {
     }
 }
 
-/// With DecodeStrategy::Retry (the default), a handler-emitted Abort whose reason
+/// With `DecodeStrategy::Retry` (the default), a handler-emitted Abort whose reason
 /// happens to start with "decode " must STILL be honored as terminal-dead on the
 /// first attempt — NOT retried as if it were a JSON decode failure.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
