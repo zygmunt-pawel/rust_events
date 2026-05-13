@@ -61,9 +61,9 @@ pub(crate) struct Registry {
     pub(crate) by_type: HashMap<&'static str, Vec<String>>,
 }
 
-#[allow(dead_code)] // lookup/handler_ids_for used in Phase 6 (dispatch) + Phase 7 (worker)
 impl Registry {
     /// Creates an empty registry.
+    #[allow(dead_code)] // used in tests and potentially Phase 7
     pub(crate) fn new() -> Self {
         Self {
             handlers: HashMap::new(),
@@ -72,6 +72,7 @@ impl Registry {
     }
 
     /// Look up a handler by its stable `handler_id`.
+    #[allow(dead_code)] // used in Phase 7 (worker wrapper)
     pub(crate) fn lookup(&self, handler_id: &str) -> Option<&Arc<dyn ErasedHandler>> {
         self.handlers.get(handler_id)
     }
