@@ -7,6 +7,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
 /// The transactional outbox runtime. Created via [`crate::builder::OutboxBuilder`].
+#[allow(dead_code)] // pool/config/registry used in Phase 6 (dispatch) + Phase 8 (start)
 pub struct Outbox {
     pub(crate) pool: PgPool,
     pub(crate) config: OutboxConfig,

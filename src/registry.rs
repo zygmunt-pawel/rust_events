@@ -10,6 +10,7 @@ use crate::handler::{DomainEvent, EventHandler, HandlerContext, HandlerError};
 /// Each concrete `TypedHandler<E, H>` implements this trait, allowing the
 /// registry to store heterogeneous handler types behind a single pointer.
 #[async_trait::async_trait]
+#[allow(dead_code)] // handle_erased called in Phase 7 worker wrapper
 pub(crate) trait ErasedHandler: Send + Sync + 'static {
     /// Deserialize `payload` as the concrete event type and invoke the
     /// underlying [`EventHandler`].
@@ -25,6 +26,7 @@ pub(crate) trait ErasedHandler: Send + Sync + 'static {
 ///
 /// `PhantomData<fn() -> E>` gives covariance in `E` without imposing
 /// `Send`/`Sync` constraints through ownership of an `E` value.
+#[allow(dead_code)] // inner read in Phase 7 (worker) via handle_erased
 pub(crate) struct TypedHandler<E, H> {
     pub(crate) inner: Arc<H>,
     pub(crate) _e: PhantomData<fn() -> E>,
@@ -59,6 +61,7 @@ pub(crate) struct Registry {
     pub(crate) by_type: HashMap<&'static str, Vec<String>>,
 }
 
+#[allow(dead_code)] // lookup/handler_ids_for used in Phase 6 (dispatch) + Phase 7 (worker)
 impl Registry {
     /// Creates an empty registry.
     pub(crate) fn new() -> Self {
