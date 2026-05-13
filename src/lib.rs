@@ -34,5 +34,8 @@ pub use crate::builder::{
 pub mod handle;
 pub use crate::handle::{OutboxHandle, Stats};
 
+pub mod history;
+pub use crate::history::{DeliveryStatus, EventRecord, HandlerDeliveryRecord, History};
+
 pub mod outbox;
 pub use crate::outbox::Outbox;

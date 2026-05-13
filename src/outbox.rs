@@ -218,6 +218,14 @@ impl Outbox {
 }
 
 impl Outbox {
+    /// Return a [`crate::history::History`] accessor bound to this outbox's pool.
+    #[must_use]
+    pub const fn history(&self) -> crate::history::History<'_> {
+        crate::history::History { pool: &self.pool }
+    }
+}
+
+impl Outbox {
     /// First call starts the worker; subsequent calls return
     /// [`StartError::AlreadyStarted`].
     ///
