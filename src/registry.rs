@@ -5,6 +5,21 @@ use std::{collections::HashMap, marker::PhantomData, sync::Arc};
 
 use crate::handler::{DomainEvent, EventHandler, HandlerContext, HandlerError};
 
+/// Outcome of one type-erased handler invocation. `DecodeFailed` is a
+/// crate-internal third state — it does NOT escape as a `HandlerError`,
+/// so runtime can dispatch `DecodeStrategy` without string-matching reasons.
+#[derive(Debug)]
+pub(crate) enum HandlerOutcome {
+    /// Handler returned `Ok(())`.
+    Ok,
+    /// Handler returned `Err(HandlerError::{Retry,Skip,Abort})`.
+    Handler(HandlerError),
+    /// Payload bytes failed to deserialize as the target event type. The
+    /// string is the formatted `serde_json::Error` (parser position /
+    /// expected tokens, not payload values).
+    DecodeFailed(String),
+}
+
 /// Object-safe async handler that operates on raw bytes.
 ///
 /// Each concrete `TypedHandler<E, H>` implements this trait, allowing the
@@ -12,12 +27,13 @@ use crate::handler::{DomainEvent, EventHandler, HandlerContext, HandlerError};
 #[async_trait::async_trait]
 pub(crate) trait ErasedHandler: Send + Sync + 'static {
     /// Deserialize `payload` as the concrete event type and invoke the
-    /// underlying [`EventHandler`].
+    /// underlying [`EventHandler`]. Returns a [`HandlerOutcome`] so the
+    /// runtime can distinguish decode failures from handler-emitted errors.
     async fn handle_erased(
         &self,
         payload: &[u8],
         ctx: &HandlerContext,
-    ) -> Result<(), HandlerError>;
+    ) -> HandlerOutcome;
 }
 
 /// A concrete handler `H` for event type `E`, stored type-erased in the
@@ -40,11 +56,20 @@ where
         &self,
         payload: &[u8],
         ctx: &HandlerContext,
-    ) -> Result<(), HandlerError> {
-        let event: E = serde_json::from_slice(payload).map_err(|e| {
-            HandlerError::abort(format!("decode {}: {e}", E::EVENT_TYPE))
-        })?;
-        self.inner.handle(&event, ctx).await
+    ) -> HandlerOutcome {
+        let event: E = match serde_json::from_slice(payload) {
+            Ok(e) => e,
+            Err(e) => {
+                return HandlerOutcome::DecodeFailed(format!(
+                    "decode {}: {e}",
+                    E::EVENT_TYPE
+                ));
+            }
+        };
+        match self.inner.handle(&event, ctx).await {
+            Ok(()) => HandlerOutcome::Ok,
+            Err(err) => HandlerOutcome::Handler(err),
+        }
     }
 }
 

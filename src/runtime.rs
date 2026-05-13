@@ -4,7 +4,7 @@
 #![allow(clippy::redundant_pub_crate)]
 
 use crate::builder::OutboxConfig;
-use crate::registry::Registry;
+use crate::registry::{HandlerOutcome, Registry};
 use crate::util::truncate_utf8;
 use crate::limits;
 use sqlx::PgPool;
@@ -337,21 +337,24 @@ impl OutboxRuntime {
         };
 
         // ⑤ Handler call via type-erased dispatch.
-        let result = handler.handle_erased(&row.payload, &hctx).await;
+        let outcome = handler.handle_erased(&row.payload, &hctx).await;
 
-        // ⑥ Translate decode aborts based on decode_error_strategy.
-        // TypedHandler::handle_erased returns Abort("decode ...") on JSON decode failure;
-        // when strategy=Retry we convert it so the wrapper retries instead.
-        let result = match (result, self.config.decode_error_strategy) {
-            (Err(HandlerError::Abort { reason }), DecodeStrategy::Retry)
-                if reason.starts_with("decode ") =>
-            {
+        // ⑥ Translate decode failures via decode_error_strategy. Decode is a
+        // crate-internal signal (HandlerOutcome::DecodeFailed) — never a
+        // HandlerError variant — so handler-emitted Abort("decode-anything")
+        // is honored verbatim as terminal-dead.
+        let result: Result<(), HandlerError> = match (outcome, self.config.decode_error_strategy) {
+            (HandlerOutcome::Ok, _) => Ok(()),
+            (HandlerOutcome::Handler(err), _) => Err(err),
+            (HandlerOutcome::DecodeFailed(reason), DecodeStrategy::Retry) => {
                 Err(HandlerError::Retry {
                     reason,
                     retry_in: None,
                 })
             }
-            (other, _) => other,
+            (HandlerOutcome::DecodeFailed(reason), DecodeStrategy::Abort) => {
+                Err(HandlerError::Abort { reason })
+            }
         };
 
         // ⑦ Terminal transition based on handler result.
