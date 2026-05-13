@@ -24,6 +24,10 @@ thiserror = "=2.0.18"
 uuid = { version = "=1.23.1", features = ["v4", "v7", "serde"] }
 chrono = { version = "=0.4.44", default-features = false, features = ["serde", "clock"] }
 async-trait = "=0.1.83"
+# FutureExt::catch_unwind: lets us wrap the user handler call inside
+# handle_envelope so mark_*_fenced runs even on panic (otherwise pgwq's
+# PanicPolicy bypasses our cleanup and the audit row stays 'running').
+futures = { version = "=0.3.31", default-features = false, features = ["std"] }
 
 [dev-dependencies]
 tokio = { version = "=1.52.3", features = ["full", "test-util"] }
@@ -31,7 +35,6 @@ testcontainers = "=0.27.3"
 testcontainers-modules = { version = "=0.15.0", features = ["postgres"] }
 tracing-subscriber = { version = "=0.3.23", features = ["env-filter"] }
 proptest = "=1.5.0"
-futures = "=0.3.31"
 
 [lints.rust]
 unsafe_code = "forbid"

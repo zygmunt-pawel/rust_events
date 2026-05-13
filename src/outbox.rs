@@ -169,10 +169,19 @@ impl Outbox {
             }
         }
 
-        // 6. INSERT outbox.events.
+        // 6. INSERT outbox.events. Serialize headers once and pre-check size
+        //    to surface a typed error rather than an opaque DB CHECK violation.
         let headers_json = serde_json::Value::Object(
             ctx.headers().cloned().unwrap_or_default(),
         );
+        let headers_text = serde_json::to_string(&headers_json)
+            .map_err(DispatchError::Codec)?;
+        if headers_text.len() > limits::MAX_HEADERS_BYTES {
+            return Err(DispatchError::HeadersTooLarge {
+                size: headers_text.len(),
+                max: limits::MAX_HEADERS_BYTES,
+            });
+        }
         sqlx::query(
             "INSERT INTO outbox.events
                 (id, event_type, producer_bc, tenant_id, payload, headers)
@@ -276,6 +285,24 @@ impl Outbox {
         // success we `disarm()` and `started` stays `true` for the
         // process lifetime.
         let mut guard = StartedGuard::new(&self.started);
+
+        // Schema probe: no-op SELECT against outbox.events. If migrator was
+        // not run, SQLSTATE 42P01 (undefined_table) or 3F000 (invalid_schema)
+        // surfaces as StartError::SchemaMissing — caller fails fast instead
+        // of watching the worker retry-loop forever. Other probe errors fall
+        // through to pgwq's build/start path, which has its own diagnostics
+        // (connection failures, missing pgwq.jobs, etc.).
+        if let Err(e) = sqlx::query("SELECT 1 FROM outbox.events LIMIT 0")
+            .execute(&self.pool)
+            .await
+            && let sqlx::Error::Database(db) = &e
+            && matches!(db.code().as_deref(), Some("42P01" | "3F000"))
+        {
+            return Err(StartError::SchemaMissing(e));
+        }
+        // Non-42P01/3F000 probe failures fall through: pgwq's own Worker
+        // build/start path will surface the same condition with its richer
+        // error variants (connection failures, missing pgwq.jobs, etc.).
 
         let runtime = Arc::new(OutboxRuntime {
             pool: self.pool.clone(),

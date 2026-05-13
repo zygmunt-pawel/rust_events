@@ -24,26 +24,52 @@ impl OutboxHandle {
     /// Graceful drain with a deadline. Returns `pg_work_queue` worker stats
     /// plus a count of still-non-terminal `handler_deliveries` rows.
     ///
+    /// The pending-count query is capped by whatever budget is left after the
+    /// pgwq drain (with a 500 ms floor). On timeout or query error we surface
+    /// `pending_deliveries: 0` and emit `rust_events.shutdown.pending_count_*`
+    /// tracing — we never lose pgwq Stats just because the count failed.
+    ///
     /// # Errors
     ///
-    /// Returns [`ShutdownError`] if the worker fails to drain or the
-    /// pending-count query fails.
+    /// Returns [`ShutdownError::Pgwq`] only if the underlying worker drain
+    /// itself fails. Count-query failures degrade gracefully.
     pub async fn shutdown(
         self,
         timeout: Duration,
     ) -> Result<(Stats, OutboxStats), ShutdownError> {
+        let start = std::time::Instant::now();
         let stats = self.inner.shutdown(timeout).await?;
-        let pending: i64 = sqlx::query_scalar(
+        let remaining = timeout
+            .saturating_sub(start.elapsed())
+            .max(Duration::from_millis(500));
+        let count_q = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM outbox.handler_deliveries
              WHERE status IN ('queued','running','awaiting_retry')",
         )
-        .fetch_one(&self.pool)
-        .await
-        .map_err(ShutdownError::PendingCount)?;
+        .fetch_one(&self.pool);
+        let pending = match tokio::time::timeout(remaining, count_q).await {
+            Ok(Ok(n)) => u64::try_from(n).unwrap_or(0),
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    target: "rust_events.shutdown.pending_count_err",
+                    error = %e,
+                    "shutdown pending-count query failed; reporting 0"
+                );
+                0
+            }
+            Err(_) => {
+                tracing::warn!(
+                    target: "rust_events.shutdown.pending_count_timeout",
+                    remaining_ms = u64::try_from(remaining.as_millis()).unwrap_or(u64::MAX),
+                    "shutdown pending-count query exceeded budget; reporting 0"
+                );
+                0
+            }
+        };
         Ok((
             stats,
             OutboxStats {
-                pending_deliveries: u64::try_from(pending).unwrap_or(0),
+                pending_deliveries: pending,
             },
         ))
     }

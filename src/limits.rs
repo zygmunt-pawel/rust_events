@@ -13,6 +13,10 @@ pub const MAX_BC_BYTES: usize = 64;
 pub const MAX_IDEMPOTENCY_KEY_BYTES: usize = 128;
 /// Max encoded payload size — matches `pg_work_queue::MAX_PAYLOAD_BYTES`.
 pub const MAX_PAYLOAD_BYTES: usize = 1_048_576;
+/// Max byte length of serialized headers JSON. Defense in depth vs.
+/// caller-supplied unbounded maps (e.g. HTTP request headers funneled into
+/// dispatch). Mirrored by a DB CHECK on `outbox.events.headers`.
+pub const MAX_HEADERS_BYTES: usize = 16 * 1024;
 /// Max length of stored `last_error` after UTF-8-safe truncation.
 pub const MAX_LAST_ERROR_BYTES: usize = 8192;
 /// Chunk size for purge functions. Mirrors `pg_work_queue` purge constant.

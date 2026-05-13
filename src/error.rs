@@ -1,7 +1,7 @@
 //! Public error types. All `thiserror::Error`, `#[non_exhaustive]`,
 //! `Send + Sync + 'static`. See spec §9.
 
-use crate::util::is_pg_constraint_violation;
+use crate::util::is_sqlx_deterministic;
 
 /// Errors returned by `OutboxBuilder::build()` for invalid configuration.
 #[derive(Debug, thiserror::Error)]
@@ -85,6 +85,15 @@ pub enum DispatchError {
         max: usize,
     },
 
+    /// Serialized headers JSON exceeds the maximum allowed size.
+    #[error("encoded headers size {size} exceeds max {max}")]
+    HeadersTooLarge {
+        /// Actual encoded byte size of the serialized headers JSON.
+        size: usize,
+        /// Maximum allowed byte size.
+        max: usize,
+    },
+
     /// No handlers are registered for the event type.
     ///
     /// Only raised when `OutboxBuilder::allow_no_handlers(false)` (the default).
@@ -104,8 +113,8 @@ pub enum DispatchError {
     #[error("pg_work_queue push failed")]
     PgwqPush(#[from] pg_work_queue::PushError),
 
-    /// Deterministic database error (constraint violation, etc.) — retry
-    /// unlikely to help.
+    /// Deterministic database error — SQLSTATE classes `22`/`23`/`28`/`42`
+    /// or a deterministic `sqlx::Error` variant. Retry is unlikely to help.
     #[error("database constraint violation during dispatch")]
     Constraint(#[source] sqlx::Error),
 
@@ -128,7 +137,7 @@ impl DispatchError {
 
 impl From<sqlx::Error> for DispatchError {
     fn from(e: sqlx::Error) -> Self {
-        if is_pg_constraint_violation(&e) {
+        if is_sqlx_deterministic(&e) {
             Self::Constraint(e)
         } else {
             Self::Transient(e)
@@ -161,6 +170,13 @@ pub enum StartError {
     /// `start()` was called a second time on an already-started `Outbox`.
     #[error("outbox already started; second start() rejected")]
     AlreadyStarted,
+
+    /// The `outbox.events` table is missing. Almost always means
+    /// `rust_events::migrator()` was not run on this database. Loud-fail at
+    /// startup rather than letting the worker swallow `42P01` / `3F000` as a
+    /// retriable error forever.
+    #[error("outbox schema missing — did you run rust_events::migrator()?")]
+    SchemaMissing(#[source] sqlx::Error),
 
     /// Building the underlying `pg_work_queue` worker failed.
     #[error("pg_work_queue worker build failed")]
