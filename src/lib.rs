@@ -10,3 +10,6 @@ pub use crate::migrator::migrator;
 
 pub mod handler;
 pub use crate::handler::{DomainEvent, EventHandler, HandlerContext, HandlerError};
+
+pub mod dispatch_context;
+pub use crate::dispatch_context::DispatchContext;
