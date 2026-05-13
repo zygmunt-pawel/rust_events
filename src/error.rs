@@ -56,6 +56,17 @@ pub enum DispatchError {
         max: usize,
     },
 
+    /// `E::EVENT_TYPE` byte length is 0 or exceeds the allowed maximum.
+    /// Pre-emptive Rust-side check; DB CHECK on `outbox.events` would
+    /// otherwise surface this as an opaque `DispatchError::Constraint`.
+    #[error("event_type length {len} bytes not in 1..={max}")]
+    EventTypeInvalid {
+        /// Actual byte length (0 means empty).
+        len: usize,
+        /// Maximum allowed byte length.
+        max: usize,
+    },
+
     /// `idempotency_key` byte length is 0 or exceeds the allowed maximum.
     #[error("idempotency_key length {len} bytes not in 1..={max}")]
     IdempotencyKeyInvalid {

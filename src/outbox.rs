@@ -80,6 +80,12 @@ impl Outbox {
         event: &E,
     ) -> Result<DispatchOutcome, DispatchError> {
         // 1. Validate inputs (early, no I/O).
+        if E::EVENT_TYPE.is_empty() || E::EVENT_TYPE.len() > limits::MAX_EVENT_TYPE_BYTES {
+            return Err(DispatchError::EventTypeInvalid {
+                len: E::EVENT_TYPE.len(),
+                max: limits::MAX_EVENT_TYPE_BYTES,
+            });
+        }
         if ctx.tenant_id().len() > limits::MAX_TENANT_BYTES {
             return Err(DispatchError::TenantIdTooLong {
                 len: ctx.tenant_id().len(),
