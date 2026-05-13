@@ -7,3 +7,6 @@ pub mod limits;
 pub(crate) mod util;
 pub mod migrator;
 pub use crate::migrator::migrator;
+
+pub mod handler;
+pub use crate::handler::{DomainEvent, HandlerContext, HandlerError};
