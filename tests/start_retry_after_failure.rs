@@ -55,3 +55,11 @@ async fn start_after_failure_does_not_return_already_started() {
         "second start must NOT return AlreadyStarted after first failure: {second:?}",
     );
 }
+
+// Note: the success-half of the RAII contract — disarm() on success keeps
+// `started == true`, so the second start returns AlreadyStarted — is covered
+// by `tests/double_start_rejected.rs::second_start_returns_already_started`.
+// The Err-half is covered above. Together they prove both branches of
+// `StartedGuard`. A composed Err → Ok → Err(AlreadyStarted) test in a single
+// instance was attempted but requires a recoverable pgwq build/start failure,
+// which `_sqlx_migrations` ledger persistence makes awkward to forge.

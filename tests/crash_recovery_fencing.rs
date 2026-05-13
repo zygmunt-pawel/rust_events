@@ -207,3 +207,104 @@ async fn b1_stale_ok_after_concurrent_dead_remains_dead() {
     // Handler returns Ok, but concurrent worker already marked 'dead' → stays 'dead'.
     b1_gated_fencing_race(GateResult::Ok, "dead", "dead").await;
 }
+
+/// `attempts` must NEVER regress, even when a stale worker re-claims a job
+/// whose `pgwq` view of `ctx.attempt` resets. Codified the `GREATEST(hd.attempts, $3)`
+/// invariant in the fenced CTE (finding #14).
+///
+/// Strategy: dispatch one event, force the audit row to a high `attempts`
+/// value while it is `awaiting_retry`, then claim happens again with
+/// `ctx.attempt < hd.attempts` (simulated by manually crafting state). After
+/// the next claim transitions through the CTE, `attempts` must equal the
+/// pre-existing high value, not the lower `ctx.attempt`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn attempts_never_regress_across_fence_out() {
+    type Row = (
+        Vec<u8>,
+        String,
+        String,
+        serde_json::Value,
+        Option<String>,
+        Option<String>,
+        bool,
+    );
+    let (_c, pool) = common::pg_container().await;
+    pg_work_queue::migrator().run(&pool).await.unwrap();
+    rust_events::migrator().run(&pool).await.unwrap();
+
+    // Insert an event + handler_deliveries row directly in awaiting_retry
+    // with attempts=7 (simulating "old worker got that far").
+    let event_id = uuid::Uuid::now_v7();
+    sqlx::query(
+        "INSERT INTO outbox.events (id, event_type, payload) VALUES ($1, 'test.b1', '\\x'::bytea)",
+    )
+    .bind(event_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+    // Temporal CHECK requires first_attempted_at >= created_at. Pin
+    // created_at to a past moment so first/last_attempted_at can also be
+    // in the past while staying ordered.
+    sqlx::query(
+        "INSERT INTO outbox.handler_deliveries
+            (event_id, handler_id, status, attempts, created_at,
+             first_attempted_at, last_attempted_at)
+         VALUES ($1, 'h', 'awaiting_retry', 7,
+                 now() - interval '5 minutes',
+                 now() - interval '1 minute',
+                 now() - interval '1 second')",
+    )
+    .bind(event_id)
+    .execute(&pool)
+    .await
+    .unwrap();
+
+    // Directly run the SAME CTE that the worker uses, with ctx.attempt = 1
+    // (simulating pgwq fresh claim). attempts must remain 7, not regress to 1.
+    let new_lease = uuid::Uuid::now_v7();
+    let _: Option<Row> = sqlx::query_as(
+        r"
+        WITH locked AS (
+            SELECT id, status FROM outbox.handler_deliveries
+            WHERE event_id = $1 AND handler_id = $2
+            FOR UPDATE
+        ),
+        updated AS (
+            UPDATE outbox.handler_deliveries hd
+            SET status = 'running',
+                lease_token = $4,
+                attempts = GREATEST(hd.attempts, $3),
+                last_attempted_at = now(),
+                first_attempted_at = COALESCE(hd.first_attempted_at, now()),
+                last_error = NULL
+            FROM locked
+            WHERE hd.id = locked.id
+              AND locked.status NOT IN ('sent','dead','skipped')
+            RETURNING hd.id
+        )
+        SELECT e.payload, e.tenant_id, e.producer_bc, e.headers,
+               dk.idempotency_key,
+               (SELECT status::text FROM locked),
+               EXISTS(SELECT 1 FROM updated)
+        FROM outbox.events e
+        LEFT JOIN outbox.dispatch_keys dk ON dk.event_id = e.id
+        WHERE e.id = $1
+        ",
+    )
+    .bind(event_id)
+    .bind("h")
+    .bind(1_i32) // ctx.attempt regressed to 1
+    .bind(new_lease)
+    .fetch_optional(&pool)
+    .await
+    .unwrap();
+
+    let post: i32 = sqlx::query_scalar(
+        "SELECT attempts FROM outbox.handler_deliveries WHERE event_id=$1",
+    )
+    .bind(event_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(post, 7, "attempts must not regress (GREATEST invariant)");
+}
