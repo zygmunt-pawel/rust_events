@@ -1,0 +1,18 @@
+# cargo-audit configuration for rust_events.
+# Re-evaluate quarterly; remove entries once upstream fixes are available.
+
+[advisories]
+ignore = [
+    # RUSTSEC-2023-0071: Marvin Attack (timing sidechannel in `rsa` crate).
+    # Reachable only via `sqlx-mysql`, which is pulled into the dependency
+    # graph by `sqlx-macros-core` (proc-macro crate) but NOT compiled into
+    # our binary — we enable only the `postgres` feature of `sqlx`:
+    #
+    #     sqlx = { version = "=0.8.6", default-features = false,
+    #              features = ["postgres", ...], ... }
+    #
+    # The vulnerable RSA code path is unreachable from rust_events. No
+    # upstream fix is published yet (verified 2026-05-13). Track the
+    # `rsa` crate for a release with a constant-time implementation.
+    "RUSTSEC-2023-0071",
+]
