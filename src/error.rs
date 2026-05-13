@@ -115,6 +115,14 @@ pub enum DispatchError {
 
     /// Deterministic database error — SQLSTATE classes `22`/`23`/`28`/`42`
     /// or a deterministic `sqlx::Error` variant. Retry is unlikely to help.
+    ///
+    /// # Privacy
+    ///
+    /// The underlying `sqlx::Error` is exposed via `source()`. Its `Debug`
+    /// representation MAY include the Postgres `DETAIL` line, which echoes
+    /// values of `idempotency_key` / `tenant_id` from unique-constraint
+    /// violations. When logging this error, prefer `Display` (`"{e}"`) over
+    /// `Debug` (`"{e:?}"` or `tracing::error!(?e)`).
     #[error("database constraint violation during dispatch")]
     Constraint(#[source] sqlx::Error),
 

@@ -203,7 +203,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 │     Retry (default) → mark awaiting_retry                          │
 │     Abort           → mark dead                                    │
 │                                                                    │
-│  ⑤ Call typed handler                                              │
+│  ⑤ Call typed handler — wrapped in tokio::time::timeout +          │
+│     futures::FutureExt::catch_unwind                               │
+│       Timeout  → HandlerError::retry("handler_timeout")            │
+│       Panic    → HandlerError::{retry,abort} per panic_policy      │
 │                                                                    │
 │  ⑥ Ok → mark_sent (fenced)                                         │
 │     HandlerError::Retry → awaiting_retry or dead at max_attempts   │
@@ -393,6 +396,9 @@ Dispatching an event with no registered handler is most often a configuration er
 **`strict_handler_lookup` defaults to `false`.**
 In rolling deploys, workers on old replicas will see handler IDs registered by new replicas. Loose mode (default) retries without touching the `handler_deliveries` row, leaving it at `queued` with `attempts=0` so a new replica can pick it up. Strict mode dead-letters immediately on the first claim. Use strict mode only when handler registration is stable across all running replicas.
 
+**User handler is wrapped inside `handle_envelope`, even though `pg_work_queue` already provides `handler_timeout` and `panic_policy`.**
+Both pgwq mechanisms cancel / flip `pgwq.jobs` *without* calling our handler closure again, which would leave `outbox.handler_deliveries` stuck at `status='running'`. We wrap `handler.handle_erased(...)` in `tokio::time::timeout` (firing `HANDLER_CLEANUP_BUDGET = 200ms` before pgwq's outer timer) and `futures::FutureExt::catch_unwind`, then route both branches through `HandlerError::{retry,abort}`. The existing step ⑦ machinery then calls `mark_*_fenced` and returns `JobError` to pgwq — pgwq applies its own scheduling on `pgwq.jobs` consistently. Net effect: both audit rows reach terminal states together, panic_policy semantics are preserved, and the worker's `handler_timeout` setting still bounds wall-clock per attempt.
+
 ---
 
 ## Known limitations
@@ -406,6 +412,8 @@ In rolling deploys, workers on old replicas will see handler IDs registered by n
 4. **Minor status drift between `pgwq.jobs` and `handler_deliveries` after a crash.** If a worker crashes between `mark_dead_fenced` and `pg_work_queue`'s own `mark_done`, the reaper re-queues the job. The next worker sees `handler_deliveries.status='dead'` (terminal), returns `Ok`, and `pg_work_queue` marks the job done. The `pgwq.jobs` row ends up `done` while our row is `dead`. Both are terminal; the at-least-once contract is satisfied. The reverse (pgwq `dead`, our `sent`) is prevented by fencing.
 
 5. **Loose handler-lookup mode silently retries on missing registry entries.** If a new handler is never deployed, jobs exhaust `max_attempts` and become dead in `pg_work_queue`. Detection: `handler_deliveries` rows stuck at `queued` with low `attempts` and `last_attempted_at` from recent worker ticks. Switch to `strict_handler_lookup=true` once the deploy is stable, or alert on `rust_events.worker.handler_missing` tracing events.
+
+6. **`HandlerError::{Retry,Skip,Abort}::reason` is durable and operator-visible.** Reason strings are persisted in `outbox.handler_deliveries.last_error` AND `pgwq.jobs.last_error`, and surface in operator logs and tracing. Do NOT format payload values, user PII (emails, names, tokens), or other sensitive data into the reason. Prefer enum-like categories — `"upstream_5xx"`, `"rate_limited"`, `"feature_flag_off"`. For detail, use `tracing::error!()` from inside the handler instead; tracing has its own retention policy distinct from the audit columns. Reason strings are sanitized for control characters and ANSI escapes (NUL → `?`, etc.) before storage and truncated to 8 KiB.
 
 ---
 

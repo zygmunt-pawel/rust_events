@@ -35,6 +35,21 @@ impl<'a> DispatchContext<'a> {
     }
 
     /// Set a caller-supplied idempotency key for this dispatch.
+    ///
+    /// # Scope
+    ///
+    /// The key is **per-`tenant_id`, not per-event-type**. Reusing the same
+    /// key across different `DomainEvent` types within one tenant collapses
+    /// them to a single event — the second dispatch returns
+    /// [`crate::outcome::DispatchOutcome::Duplicate`] pointing at the first
+    /// event, regardless of the Rust type. This is intentional (the outbox
+    /// keys on business-level identity, not on Rust type), but it means
+    /// callers MUST encode any per-type dimension into the key themselves:
+    ///
+    /// ```ignore
+    /// let key = format!("{}:{}", E::EVENT_TYPE, business_id);
+    /// ctx.with_idempotency_key(&key)
+    /// ```
     #[must_use]
     pub const fn with_idempotency_key(mut self, key: &'a str) -> Self {
         self.idempotency_key = Some(key);
