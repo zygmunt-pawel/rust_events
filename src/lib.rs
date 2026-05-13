@@ -3,5 +3,6 @@
 //! See `docs/superpowers/specs/2026-05-13-rust-events-design.md` for design.
 #![doc(html_root_url = "https://docs.rs/rust_events/0.1.0")]
 
+pub mod limits;
 pub mod migrator;
 pub use crate::migrator::migrator;
