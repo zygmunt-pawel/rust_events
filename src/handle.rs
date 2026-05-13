@@ -10,6 +10,7 @@ pub use pg_work_queue::Stats;
 
 /// Handle returned by [`crate::outbox::Outbox::start`]. Drop to cancel the
 /// worker; call [`OutboxHandle::shutdown`] for a graceful drain.
+#[derive(Debug)]
 pub struct OutboxHandle {
     inner: pg_work_queue::WorkerHandle,
     pool: PgPool,
