@@ -31,12 +31,23 @@ CREATE TABLE outbox.events (
     CONSTRAINT events_producer_bc_bytes  CHECK (octet_length(producer_bc) <= 64),
     CONSTRAINT events_tenant_id_bytes    CHECK (octet_length(tenant_id) <= 64),
     CONSTRAINT events_payload_size       CHECK (octet_length(payload) <= 1048576),
-    CONSTRAINT events_headers_object     CHECK (jsonb_typeof(headers) = 'object')
+    CONSTRAINT events_headers_object     CHECK (jsonb_typeof(headers) = 'object'),
+    -- Bound headers JSON length to match limits::MAX_HEADERS_BYTES on the
+    -- Rust side. octet_length(headers::text) measures the serialized form;
+    -- jsonb internal storage may be smaller, but the wire/Rust view is
+    -- what callers reason about.
+    CONSTRAINT events_headers_size       CHECK (octet_length(headers::text) <= 16384)
 );
 
 -- No listing index in initial migration. Operators add their own for their query
 -- patterns (most common: tenant + event_type + recency). Keeping initial migration
 -- write-cheap; documented in README.
+--
+-- Exception: purge_events filters and orders by created_at. Without this index,
+-- each chunk degenerates to Seq Scan + Sort + Limit on the full table — and
+-- since purge_events is a public API, the cost is library-owned, not
+-- operator-tunable.
+CREATE INDEX events_created_at_idx ON outbox.events (created_at);
 
 CREATE TRIGGER deny_update_events
     BEFORE UPDATE ON outbox.events
@@ -59,7 +70,14 @@ CREATE TABLE outbox.dispatch_keys (
     CONSTRAINT dispatch_keys_key_bytes     CHECK (octet_length(idempotency_key) BETWEEN 1 AND 128)
 );
 
-CREATE INDEX dispatch_keys_event_idx ON outbox.dispatch_keys (event_id);
+-- UNIQUE: the dispatch path inserts at most one dispatch_keys row per event
+-- (ON CONFLICT DO NOTHING on PK (tenant_id, idempotency_key)). The fenced CTE
+-- in runtime.rs does `LEFT JOIN outbox.dispatch_keys dk ON dk.event_id = e.id`
+-- with fetch_optional — without UNIQUE, an admin script or restore that
+-- associates two dispatch keys with the same event_id would produce
+-- duplicate-row errors and a retry loop. Encoding the 1:1 invariant in the
+-- schema makes the join total.
+CREATE UNIQUE INDEX dispatch_keys_event_unique ON outbox.dispatch_keys (event_id);
 
 -- Purge sweeps by created_at; without this index, full table scan per chunk.
 CREATE INDEX dispatch_keys_created_at_idx ON outbox.dispatch_keys (created_at);
@@ -127,6 +145,9 @@ CREATE TABLE outbox.handler_deliveries (
             AND finished_at IS NULL
             AND lease_token IS NULL)
         OR (status IN ('sent','dead','skipped')
+            AND attempts > 0
+            AND first_attempted_at IS NOT NULL
+            AND last_attempted_at IS NOT NULL
             AND finished_at IS NOT NULL
             AND lease_token IS NULL)
     ),
@@ -136,6 +157,14 @@ CREATE TABLE outbox.handler_deliveries (
 
 CREATE INDEX handler_deliveries_event_idx
     ON outbox.handler_deliveries (event_id);
+
+-- Partial index aligned with the purge_events anti-join predicate. Without
+-- this, purge candidates ("events where ALL deliveries are terminal") incur a
+-- heap-fetch per delivery row. With K handlers/event and most deliveries in
+-- terminal states, this saves K× I/O on the sweeper hot path.
+CREATE INDEX handler_deliveries_active_by_event_idx
+    ON outbox.handler_deliveries (event_id)
+    WHERE status IN ('queued','running','awaiting_retry');
 
 CREATE INDEX handler_deliveries_pending_idx
     ON outbox.handler_deliveries (status, created_at)

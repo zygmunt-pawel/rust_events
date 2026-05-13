@@ -103,13 +103,16 @@ pub async fn purge_events(
     let mut total = 0u64;
     loop {
         let n = sqlx::query(
+            // Predicate matches `handler_deliveries_active_by_event_idx`
+            // (partial index on event_id WHERE status IN active states), so
+            // the planner can pick it for the anti-join.
             "WITH victims AS (
                 SELECT e.id FROM outbox.events e
                 WHERE e.created_at < $1
                   AND NOT EXISTS (
                       SELECT 1 FROM outbox.handler_deliveries hd
                       WHERE hd.event_id = e.id
-                        AND hd.status NOT IN ('sent','dead','skipped')
+                        AND hd.status IN ('queued','running','awaiting_retry')
                   )
                 ORDER BY e.created_at ASC
                 LIMIT $2
