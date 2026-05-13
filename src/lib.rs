@@ -31,5 +31,8 @@ pub use crate::builder::{
     BackoffPolicy, DecodeStrategy, OutboxBuilder, OutboxConfig, OutboxConfigBuilder, PanicPolicy,
 };
 
+pub mod handle;
+pub use crate::handle::{OutboxHandle, Stats};
+
 pub mod outbox;
 pub use crate::outbox::Outbox;
