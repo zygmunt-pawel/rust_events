@@ -397,6 +397,11 @@ impl OutboxRuntime {
                     ctx.lease_token,
                 )
                 .await?;
+                // Skip is terminal in our audit (status='skipped') but pg_work_queue
+                // has no "skipped" — we map to abort so pgwq marks its job dead and
+                // does not retry. Operators monitoring pgwq.jobs WHERE status='dead'
+                // will see "skipped: <reason>" in last_error; distinguish from real
+                // failures by the "skipped: " prefix or by joining outbox.handler_deliveries.status.
                 Err(pg_work_queue::JobError::abort(format!("skipped: {reason}")))
             }
             Err(HandlerError::Abort { reason }) => {

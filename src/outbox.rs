@@ -1,5 +1,8 @@
 //! `Outbox` runtime — public entry point for emitting events in user tx.
 
+/// `pg_work_queue` queue name for handler delivery jobs.
+const PGWQ_QUEUE: &str = "outbox_handler_deliveries";
+
 use crate::builder::OutboxConfig;
 use crate::dispatch_context::DispatchContext;
 use crate::envelope::HandlerEnvelope;
@@ -200,7 +203,7 @@ impl Outbox {
                 handler_id: hid.clone(),
             })
             .collect();
-        pg_work_queue::Pusher::new("outbox_handler_deliveries")
+        pg_work_queue::Pusher::new(PGWQ_QUEUE)
             .push_batch(&mut *tx, &envelopes)
             .await?;
 
@@ -229,6 +232,19 @@ impl Outbox {
     /// First call starts the worker; subsequent calls return
     /// [`StartError::AlreadyStarted`].
     ///
+    /// # Intended usage
+    ///
+    /// `Outbox` is designed for build-once, start-once-per-process semantics.
+    /// Calling `start()` from multiple tasks concurrently on the same `Outbox`
+    /// instance has a TOCTOU window between the `AtomicBool::swap` returning
+    /// `false` and the worker being built — the loser sees `AlreadyStarted`
+    /// but only after the winner has fully constructed its worker. Build one
+    /// `Outbox` per process and call `start()` from a single task.
+    ///
+    /// Running multiple `Outbox` instances against the same database (e.g.,
+    /// across replicas) IS supported — `pg_work_queue`'s `FOR UPDATE SKIP LOCKED`
+    /// claim and fencing tokens make concurrent workers safe.
+    ///
     /// # Errors
     ///
     /// Returns [`StartError`] if `pg_work_queue`'s Worker build/start fails.
@@ -246,7 +262,7 @@ impl Outbox {
         let runtime_for_handler = runtime.clone();
         let inner = pg_work_queue::Worker::<HandlerEnvelope>::builder()
             .pool(self.pool.clone())
-            .queue("outbox_handler_deliveries")
+            .queue(PGWQ_QUEUE)
             .poll_interval(self.config.poll_interval)
             .concurrency(usize::try_from(self.config.concurrency).unwrap_or(usize::MAX))
             .max_attempts(self.config.max_attempts)

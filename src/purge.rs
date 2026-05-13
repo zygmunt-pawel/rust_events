@@ -131,5 +131,7 @@ pub async fn purge_events(
 }
 
 fn cutoff_from(older_than: Duration) -> chrono::DateTime<Utc> {
-    Utc::now() - chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::zero())
+    let d = chrono::Duration::from_std(older_than)
+        .unwrap_or(chrono::Duration::MAX);
+    Utc::now() - d
 }
