@@ -93,6 +93,42 @@ pub enum DeliveryStatus {
     Dead,
 }
 
+impl DeliveryStatus {
+    /// Wire-name as stored in the `outbox.delivery_status` Postgres enum.
+    /// Snake-case, matching the `sqlx(rename_all = "snake_case")` codec.
+    ///
+    /// The crate's SQL literals (`status='running'`, `status IN ('sent','dead','skipped')`)
+    /// are still hand-written for readability, but `tests/schema_invariants.rs`
+    /// pins them by round-tripping every variant through `as_str()` and the
+    /// Postgres `pg_enum.enumlabel` of `outbox.delivery_status` — adding,
+    /// renaming, or removing a variant on either side fails the build.
+    ///
+    /// Variants in order: `queued`, `running`, `awaiting_retry`, `sent`,
+    /// `skipped`, `dead`.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::AwaitingRetry => "awaiting_retry",
+            Self::Sent => "sent",
+            Self::Skipped => "skipped",
+            Self::Dead => "dead",
+        }
+    }
+
+    /// All variants in declaration order. Used by the schema-round-trip test
+    /// to enumerate without resorting to a third-party enum-iter crate.
+    pub const ALL: &'static [Self] = &[
+        Self::Queued,
+        Self::Running,
+        Self::AwaitingRetry,
+        Self::Sent,
+        Self::Skipped,
+        Self::Dead,
+    ];
+}
+
 impl History<'_> {
     /// Fetch a single event by ID, or `None` if not found.
     ///
@@ -112,17 +148,26 @@ impl History<'_> {
             DateTime<Utc>,
         );
         let row: Option<EventRow> = sqlx::query_as(
-                "SELECT id, event_type, producer_bc, tenant_id, aggregate_key,
+            "SELECT id, event_type, producer_bc, tenant_id, aggregate_key,
                         payload, headers, created_at
                  FROM outbox.events
                  WHERE id = $1",
-            )
-            .bind(event_id)
-            .fetch_optional(self.pool)
-            .await?;
+        )
+        .bind(event_id)
+        .fetch_optional(self.pool)
+        .await?;
 
         Ok(row.map(
-            |(id, event_type, producer_bc, tenant_id, aggregate_key, payload, headers_val, created_at)| {
+            |(
+                id,
+                event_type,
+                producer_bc,
+                tenant_id,
+                aggregate_key,
+                payload,
+                headers_val,
+                created_at,
+            )| {
                 let headers = match headers_val {
                     serde_json::Value::Object(m) => m,
                     _ => serde_json::Map::new(),

@@ -29,11 +29,7 @@ pub(crate) trait ErasedHandler: Send + Sync + 'static {
     /// Deserialize `payload` as the concrete event type and invoke the
     /// underlying [`EventHandler`]. Returns a [`HandlerOutcome`] so the
     /// runtime can distinguish decode failures from handler-emitted errors.
-    async fn handle_erased(
-        &self,
-        payload: &[u8],
-        ctx: &HandlerContext,
-    ) -> HandlerOutcome;
+    async fn handle_erased(&self, payload: &[u8], ctx: &HandlerContext) -> HandlerOutcome;
 }
 
 /// A concrete handler `H` for event type `E`, stored type-erased in the
@@ -52,18 +48,11 @@ where
     E: DomainEvent,
     H: EventHandler<E>,
 {
-    async fn handle_erased(
-        &self,
-        payload: &[u8],
-        ctx: &HandlerContext,
-    ) -> HandlerOutcome {
+    async fn handle_erased(&self, payload: &[u8], ctx: &HandlerContext) -> HandlerOutcome {
         let event: E = match serde_json::from_slice(payload) {
             Ok(e) => e,
             Err(e) => {
-                return HandlerOutcome::DecodeFailed(format!(
-                    "decode {}: {e}",
-                    E::EVENT_TYPE
-                ));
+                return HandlerOutcome::DecodeFailed(format!("decode {}: {e}", E::EVENT_TYPE));
             }
         };
         match self.inner.handle(&event, ctx).await {
@@ -103,8 +92,6 @@ impl Registry {
     ///
     /// Returns an empty slice when no handlers are registered for that type.
     pub(crate) fn handler_ids_for(&self, event_type: &'static str) -> &[String] {
-        self.by_type
-            .get(event_type)
-            .map_or(&[], Vec::as_slice)
+        self.by_type.get(event_type).map_or(&[], Vec::as_slice)
     }
 }

@@ -20,7 +20,6 @@ impl DomainEvent for StrictShape {
 }
 
 struct OkHandler;
-#[async_trait::async_trait]
 impl EventHandler<StrictShape> for OkHandler {
     async fn handle(&self, _: &StrictShape, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -54,13 +53,11 @@ async fn inject_bad_payload(pool: &sqlx::PgPool) -> uuid::Uuid {
         "handler_id": "h"
     }))
     .unwrap();
-    sqlx::query(
-        "INSERT INTO pgwq.jobs (queue, payload) VALUES ('outbox_handler_deliveries', $1)",
-    )
-    .bind(env)
-    .execute(pool)
-    .await
-    .unwrap();
+    sqlx::query("INSERT INTO pgwq.jobs (queue, payload) VALUES ('outbox_handler_deliveries', $1)")
+        .bind(env)
+        .execute(pool)
+        .await
+        .unwrap();
     id
 }
 
@@ -92,11 +89,12 @@ async fn m3_retry_strategy_bad_payload_eventually_dead() {
 
     // Wait up to 12 s for the retry budget to be exhausted.
     for _ in 0..60 {
-        let dead: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='dead'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let dead: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='dead'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         if dead == 1 {
             break;
         }
@@ -110,7 +108,10 @@ async fn m3_retry_strategy_bad_payload_eventually_dead() {
     .await
     .unwrap();
     assert_eq!(row.0, "dead", "retry strategy must eventually mark dead");
-    assert_eq!(row.1, 3, "should have used the full retry budget (max_attempts=3)");
+    assert_eq!(
+        row.1, 3,
+        "should have used the full retry budget (max_attempts=3)"
+    );
     assert!(
         row.2.unwrap_or_default().contains("decode"),
         "last_error must mention 'decode'"
@@ -146,25 +147,28 @@ async fn m3_abort_strategy_bad_payload_dead_immediately() {
 
     // Abort means dead on first claim — should happen within a few hundred ms.
     for _ in 0..30 {
-        let dead: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='dead'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let dead: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='dead'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         if dead == 1 {
             break;
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 
-    let row: (String, i32) = sqlx::query_as(
-        "SELECT status::text, attempts FROM outbox.handler_deliveries LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let row: (String, i32) =
+        sqlx::query_as("SELECT status::text, attempts FROM outbox.handler_deliveries LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(row.0, "dead", "abort strategy must mark dead immediately");
-    assert_eq!(row.1, 1, "abort strategy must NOT retry (attempts must be 1)");
+    assert_eq!(
+        row.1, 1,
+        "abort strategy must NOT retry (attempts must be 1)"
+    );
 
     let _ = h.shutdown(Duration::from_secs(2)).await.unwrap();
 }

@@ -4,9 +4,9 @@
 #![allow(clippy::redundant_pub_crate)]
 
 use crate::builder::OutboxConfig;
+use crate::limits;
 use crate::registry::{HandlerOutcome, Registry};
 use crate::util::{panic_payload_message, redact_db_error, sanitize_reason, truncate_utf8};
-use crate::limits;
 use futures::FutureExt;
 use sqlx::PgPool;
 use std::panic::AssertUnwindSafe;
@@ -17,7 +17,7 @@ use uuid::Uuid;
 /// Cleanup budget reserved at the tail of `handler_timeout` for our own
 /// `mark_*_fenced` UPDATE to land before pgwq's outer cancellation fires.
 /// 200 ms is well above a hot-pool single-row UPDATE (~ms) on PG18.
-const HANDLER_CLEANUP_BUDGET: Duration = Duration::from_millis(200);
+pub(crate) const HANDLER_CLEANUP_BUDGET: Duration = Duration::from_millis(200);
 
 pub(crate) struct OutboxRuntime {
     pub(crate) pool: PgPool,
@@ -45,7 +45,7 @@ impl OutboxRuntime {
         .bind(lease_token)
         .execute(&self.pool)
         .await
-        .map_err(|e| map_sql_mark(&e, "mark_sent"))?;
+        .map_err(|e| map_mark_err(&e, "mark_sent", event_id, handler_id))?;
         log_fenced_out("sent", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -72,7 +72,7 @@ impl OutboxRuntime {
         .bind(trimmed)
         .execute(&self.pool)
         .await
-        .map_err(|e| map_sql_mark(&e, "mark_retry"))?;
+        .map_err(|e| map_mark_err(&e, "mark_retry", event_id, handler_id))?;
         log_fenced_out("awaiting_retry", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -99,7 +99,7 @@ impl OutboxRuntime {
         .bind(trimmed)
         .execute(&self.pool)
         .await
-        .map_err(|e| map_sql_mark(&e, "mark_dead"))?;
+        .map_err(|e| map_mark_err(&e, "mark_dead", event_id, handler_id))?;
         log_fenced_out("dead", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -126,7 +126,7 @@ impl OutboxRuntime {
         .bind(trimmed)
         .execute(&self.pool)
         .await
-        .map_err(|e| map_sql_mark(&e, "mark_skipped"))?;
+        .map_err(|e| map_mark_err(&e, "mark_skipped", event_id, handler_id))?;
         log_fenced_out("skipped", event_id, handler_id, res.rows_affected());
         Ok(())
     }
@@ -137,12 +137,7 @@ impl OutboxRuntime {
 /// Called by all `mark_*_fenced` methods. `rows_affected=0` indicates this
 /// worker's claim is stale (another worker already applied a terminal
 /// transition), which is expected under concurrent claims and is NOT an error.
-fn log_fenced_out(
-    new_status: &str,
-    event_id: Uuid,
-    handler_id: &str,
-    rows_affected: u64,
-) {
+fn log_fenced_out(new_status: &str, event_id: Uuid, handler_id: &str, rows_affected: u64) {
     if rows_affected == 0 {
         tracing::warn!(
             target: "rust_events.audit.fenced_out",
@@ -190,9 +185,7 @@ impl OutboxRuntime {
         // so that the row is already in 'running' state when we call
         // `mark_dead_fenced` — the status invariant requires the row to be
         // 'running' before it can be marked 'dead'.
-        if self.registry.lookup(&env.handler_id).is_none()
-            && !self.config.strict_handler_lookup
-        {
+        if self.registry.lookup(&env.handler_id).is_none() && !self.config.strict_handler_lookup {
             // Loose mode: status stays 'queued', attempts stays 0, lease_token
             // stays NULL so another replica can still claim — we only bump the
             // orthogonal `resolve_attempts` counter so operators can detect
@@ -240,15 +233,18 @@ impl OutboxRuntime {
             did_update: bool,
         }
 
-        let row: Option<Row> = sqlx::query_as::<_, (
-            Vec<u8>,             // payload
-            String,              // tenant_id
-            String,              // producer_bc
-            serde_json::Value,   // headers
-            Option<String>,      // dispatch_idempotency_key
-            Option<String>,      // prev_status
-            bool,                // did_update
-        )>(
+        let row: Option<Row> = sqlx::query_as::<
+            _,
+            (
+                Vec<u8>,           // payload
+                String,            // tenant_id
+                String,            // producer_bc
+                serde_json::Value, // headers
+                Option<String>,    // dispatch_idempotency_key
+                Option<String>,    // prev_status
+                bool,              // did_update
+            ),
+        >(
             r"
             WITH locked AS (
                 SELECT id, status FROM outbox.handler_deliveries
@@ -331,9 +327,7 @@ impl OutboxRuntime {
                     prev_status = %other,
                     "non-terminal row failed to UPDATE — unexpected"
                 );
-                return Err(pg_work_queue::JobError::retry(
-                    "audit row UPDATE collision",
-                ));
+                return Err(pg_work_queue::JobError::retry("audit row UPDATE collision"));
             }
             (Some(_), true) => { /* normal path */ }
         }
@@ -396,7 +390,12 @@ impl OutboxRuntime {
             // configured `PanicPolicy` (same semantics, but now mark_*_fenced
             // actually runs and the audit row reaches a terminal state).
             Ok(Err(panic_payload)) => {
-                let msg = panic_payload_message(&*panic_payload);
+                // Sanitize at the source: panic payloads are arbitrary user
+                // strings (may contain ANSI escapes, NUL, control chars) and
+                // both the tracing log and the downstream HandlerError reason
+                // need to be clean before they reach pgwq.jobs.last_error.
+                let raw = panic_payload_message(&*panic_payload);
+                let msg = sanitize_reason(&raw);
                 tracing::error!(
                     target: "rust_events.worker.panic",
                     event_id = %env.event_id,
@@ -406,12 +405,12 @@ impl OutboxRuntime {
                     "handler panicked; routing through mark_*_fenced"
                 );
                 match self.config.panic_policy {
-                    pg_work_queue::PanicPolicy::Retry => HandlerOutcome::Handler(
-                        HandlerError::retry(format!("panic: {msg}")),
-                    ),
-                    pg_work_queue::PanicPolicy::Dead => HandlerOutcome::Handler(
-                        HandlerError::abort(format!("panic: {msg}")),
-                    ),
+                    pg_work_queue::PanicPolicy::Retry => {
+                        HandlerOutcome::Handler(HandlerError::retry(format!("panic: {msg}")))
+                    }
+                    pg_work_queue::PanicPolicy::Dead => {
+                        HandlerOutcome::Handler(HandlerError::abort(format!("panic: {msg}")))
+                    }
                 }
             }
             // Our internal timeout fired before pgwq's outer one. Treat as
@@ -450,6 +449,18 @@ impl OutboxRuntime {
         };
 
         // ⑦ Terminal transition based on handler result.
+        //
+        // `reason` flows into BOTH our `mark_*_fenced` (which sanitizes
+        // internally) AND `pg_work_queue::JobError::*` (which does not).
+        // pgwq's `last_error` column is `TEXT` — NUL bytes from a handler
+        // reason would surface as SQLSTATE 22021 on pgwq's mark write and
+        // break the worker. Sanitize once here so both legs see clean text;
+        // truncation to MAX_LAST_ERROR_BYTES matches pgwq's own char-based
+        // 8 KiB cap (bytes ≤ chars in UTF-8, so we stay under).
+        let pgwq_reason = |r: &str| -> String {
+            let cleaned = sanitize_reason(r);
+            truncate_utf8(&cleaned, limits::MAX_LAST_ERROR_BYTES).to_owned()
+        };
         match result {
             Ok(()) => {
                 self.mark_sent_fenced(env.event_id, &env.handler_id, ctx.lease_token)
@@ -458,13 +469,8 @@ impl OutboxRuntime {
             }
             Err(HandlerError::Retry { reason, retry_in }) => {
                 if ctx.attempt >= ctx.max_attempts {
-                    self.mark_dead_fenced(
-                        env.event_id,
-                        &env.handler_id,
-                        &reason,
-                        ctx.lease_token,
-                    )
-                    .await?;
+                    self.mark_dead_fenced(env.event_id, &env.handler_id, &reason, ctx.lease_token)
+                        .await?;
                 } else {
                     self.mark_awaiting_retry_fenced(
                         env.event_id,
@@ -474,40 +480,34 @@ impl OutboxRuntime {
                     )
                     .await?;
                 }
+                let pgwq_safe = pgwq_reason(&reason);
                 match retry_in {
-                    Some(d) => Err(pg_work_queue::JobError::retry_in(reason, d)),
-                    None => Err(pg_work_queue::JobError::retry(reason)),
+                    Some(d) => Err(pg_work_queue::JobError::retry_in(pgwq_safe, d)),
+                    None => Err(pg_work_queue::JobError::retry(pgwq_safe)),
                 }
             }
             Err(HandlerError::Skip { reason }) => {
                 tracing::info!(
                     target: "rust_events.worker.skipped",
-                    reason = %reason,
+                    reason = %sanitize_reason(&reason),
                     "delivery skipped by handler"
                 );
-                self.mark_skipped_fenced(
-                    env.event_id,
-                    &env.handler_id,
-                    &reason,
-                    ctx.lease_token,
-                )
-                .await?;
+                self.mark_skipped_fenced(env.event_id, &env.handler_id, &reason, ctx.lease_token)
+                    .await?;
                 // Skip is terminal in our audit (status='skipped') but pg_work_queue
                 // has no "skipped" — we map to abort so pgwq marks its job dead and
                 // does not retry. Operators monitoring pgwq.jobs WHERE status='dead'
                 // will see "skipped: <reason>" in last_error; distinguish from real
                 // failures by the "skipped: " prefix or by joining outbox.handler_deliveries.status.
-                Err(pg_work_queue::JobError::abort(format!("skipped: {reason}")))
+                Err(pg_work_queue::JobError::abort(format!(
+                    "skipped: {}",
+                    pgwq_reason(&reason)
+                )))
             }
             Err(HandlerError::Abort { reason }) => {
-                self.mark_dead_fenced(
-                    env.event_id,
-                    &env.handler_id,
-                    &reason,
-                    ctx.lease_token,
-                )
-                .await?;
-                Err(pg_work_queue::JobError::abort(reason))
+                self.mark_dead_fenced(env.event_id, &env.handler_id, &reason, ctx.lease_token)
+                    .await?;
+                Err(pg_work_queue::JobError::abort(pgwq_reason(&reason)))
             }
         }
     }
@@ -532,6 +532,34 @@ fn map_sql(e: &sqlx::Error, ctx: &str) -> pg_work_queue::JobError {
 /// Pulled out so all four mark helpers stay consistent — a constraint
 /// violation here (e.g. a future CHECK we haven't anticipated) would otherwise
 /// retry until `max_attempts` and then fail to terminalize the audit row.
-fn map_sql_mark(e: &sqlx::Error, ctx: &str) -> pg_work_queue::JobError {
-    map_sql(e, ctx)
+///
+/// When the failure mode is pool/io exhaustion, also emits
+/// `rust_events.audit.mark_pool_starved` so operators can correlate stranded
+/// `running` audit rows with under-sized connection pools. pgwq's own
+/// `concurrency × 2 + 2` minimum covers handler + mark; anything else
+/// sharing the pool (dispatch, history, purge, shutdown count) competes for
+/// the slack.
+fn map_mark_err(
+    e: &sqlx::Error,
+    kind: &str,
+    event_id: Uuid,
+    handler_id: &str,
+) -> pg_work_queue::JobError {
+    if matches!(
+        e,
+        sqlx::Error::PoolTimedOut | sqlx::Error::PoolClosed | sqlx::Error::Io(_)
+    ) {
+        tracing::warn!(
+            target: "rust_events.audit.mark_pool_starved",
+            event_id = %event_id,
+            handler_id = %handler_id,
+            mark_kind = %kind,
+            error = %redact_db_error(e),
+            "{kind} failed due to pool/io exhaustion; audit row may stay 'running' \
+             until pgwq's reaper reclaims the lease — size pool above pgwq's \
+             concurrency × 2 + 2 minimum to account for dispatch/history/purge \
+             traffic on the same pool"
+        );
+    }
+    map_sql(e, kind)
 }

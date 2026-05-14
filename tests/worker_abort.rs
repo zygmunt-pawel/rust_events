@@ -20,7 +20,6 @@ impl DomainEvent for BadEvent {
 
 struct AlwaysAbort;
 
-#[async_trait::async_trait]
 impl EventHandler<BadEvent> for AlwaysAbort {
     async fn handle(&self, _: &BadEvent, _: &HandlerContext) -> Result<(), HandlerError> {
         Err(HandlerError::abort("permanent failure"))
@@ -47,11 +46,7 @@ async fn abort_marks_dead_on_first_attempt() {
 
     let mut tx = pool.begin().await.unwrap();
     outbox
-        .dispatch(
-            &mut tx,
-            &DispatchContext::new("acme"),
-            &BadEvent { id: 42 },
-        )
+        .dispatch(&mut tx, &DispatchContext::new("acme"), &BadEvent { id: 42 })
         .await
         .unwrap();
     tx.commit().await.unwrap();

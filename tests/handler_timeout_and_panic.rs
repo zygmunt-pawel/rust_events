@@ -8,8 +8,8 @@ use rust_events::{
     OutboxBuilder, OutboxConfig, PanicPolicy,
 };
 use serde::{Deserialize, Serialize};
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 #[derive(Serialize, Deserialize)]
@@ -23,7 +23,6 @@ impl DomainEvent for Ev {
 struct SleepyHandler {
     delay: Duration,
 }
-#[async_trait::async_trait]
 impl EventHandler<Ev> for SleepyHandler {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         tokio::time::sleep(self.delay).await;
@@ -55,13 +54,21 @@ async fn handler_timeout_terminalizes_to_dead() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("sleepy", SleepyHandler { delay: Duration::from_secs(10) })
+        .register_handler::<Ev, _>(
+            "sleepy",
+            SleepyHandler {
+                delay: Duration::from_secs(10),
+            },
+        )
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    outbox.dispatch(&mut tx, &DispatchContext::new("t"), &Ev).await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     // Wait up to 10s for terminal state.
@@ -78,15 +85,17 @@ async fn handler_timeout_terminalizes_to_dead() {
             break;
         }
     }
-    assert_eq!(final_status, "dead", "handler_timeout must terminalize to dead after retries");
+    assert_eq!(
+        final_status, "dead",
+        "handler_timeout must terminalize to dead after retries"
+    );
 
     // No row left in 'running'.
-    let running: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let running: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(running, 0, "no audit row should remain in 'running'");
 
     let _ = handle.shutdown(Duration::from_secs(3)).await;
@@ -97,7 +106,6 @@ async fn handler_timeout_terminalizes_to_dead() {
 struct PanicOnceHandler {
     calls: Arc<AtomicU32>,
 }
-#[async_trait::async_trait]
 impl EventHandler<Ev> for PanicOnceHandler {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         let n = self.calls.fetch_add(1, Ordering::SeqCst);
@@ -128,13 +136,21 @@ async fn panic_policy_retry_recovers_on_next_attempt() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", PanicOnceHandler { calls: calls.clone() })
+        .register_handler::<Ev, _>(
+            "p",
+            PanicOnceHandler {
+                calls: calls.clone(),
+            },
+        )
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
 
     let mut tx = pool.begin().await.unwrap();
-    outbox.dispatch(&mut tx, &DispatchContext::new("t"), &Ev).await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
     tx.commit().await.unwrap();
 
     let mut final_status = String::new();
@@ -150,8 +166,14 @@ async fn panic_policy_retry_recovers_on_next_attempt() {
             break;
         }
     }
-    assert_eq!(final_status, "sent", "PanicPolicy::Retry must recover, got: {final_status}");
-    assert!(calls.load(Ordering::SeqCst) >= 2, "handler must be retried at least once");
+    assert_eq!(
+        final_status, "sent",
+        "PanicPolicy::Retry must recover, got: {final_status}"
+    );
+    assert!(
+        calls.load(Ordering::SeqCst) >= 2,
+        "handler must be retried at least once"
+    );
 
     let _ = handle.shutdown(Duration::from_secs(3)).await;
 }
@@ -159,7 +181,6 @@ async fn panic_policy_retry_recovers_on_next_attempt() {
 // ── PanicPolicy::Dead ────────────────────────────────────────────────────────
 
 struct AlwaysPanicHandler;
-#[async_trait::async_trait]
 impl EventHandler<Ev> for AlwaysPanicHandler {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         panic!("permanent panic");
@@ -204,29 +225,187 @@ async fn panic_policy_dead_terminalizes_immediately() {
     let mut attempts: i32 = 0;
     for _ in 0..50 {
         tokio::time::sleep(Duration::from_millis(150)).await;
-        let row: (String, i32) = sqlx::query_as(
-            "SELECT status::text, attempts FROM outbox.handler_deliveries LIMIT 1",
-        )
-        .fetch_one(&pool)
-        .await
-        .unwrap();
+        let row: (String, i32) =
+            sqlx::query_as("SELECT status::text, attempts FROM outbox.handler_deliveries LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
         final_status = row.0;
         attempts = row.1;
         if matches!(final_status.as_str(), "dead" | "sent") {
             break;
         }
     }
-    assert_eq!(final_status, "dead", "PanicPolicy::Dead must terminalize on first panic");
-    assert_eq!(attempts, 1, "PanicPolicy::Dead must NOT consume additional attempts");
+    assert_eq!(
+        final_status, "dead",
+        "PanicPolicy::Dead must terminalize on first panic"
+    );
+    assert_eq!(
+        attempts, 1,
+        "PanicPolicy::Dead must NOT consume additional attempts"
+    );
 
     // No row left in 'running'.
-    let running: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'",
+    let running: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(running, 0);
+
+    let _ = handle.shutdown(Duration::from_secs(3)).await;
+}
+
+struct NulPanicHandler;
+impl EventHandler<Ev> for NulPanicHandler {
+    async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
+        panic!("nul:\0 ansi:\x1b[31m");
+    }
+}
+
+/// Panic payload with NUL + ANSI escapes — must not break either our
+/// `mark_dead_fenced` UPDATE (`handler_deliveries.last_error` CHECK rejects NUL
+/// via Postgres 22021) NOR pgwq's `mark_dead` (`jobs.last_error` has the same
+/// constraint). Audit terminalizes; both `last_error` fields contain '?'
+/// replacement characters.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn panic_with_nul_and_ansi_terminalizes_safely() {
+    let (_c, pool) = common::pg_container().await;
+    pg_work_queue::migrator().run(&pool).await.unwrap();
+    rust_events::migrator().run(&pool).await.unwrap();
+
+    let cfg = OutboxConfig::builder()
+        .poll_interval(Duration::from_millis(100))
+        .concurrency(1)
+        .max_attempts(1)
+        .lease_timeout(Duration::from_secs(5))
+        .handler_timeout(Duration::from_secs(2))
+        .panic_policy(PanicPolicy::Dead)
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool.clone())
+        .config(cfg)
+        .register_handler::<Ev, _>("p", NulPanicHandler)
+        .build()
+        .unwrap();
+    let handle = outbox.start().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut hd_err: Option<String> = None;
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let row: (String, Option<String>) = sqlx::query_as(
+            "SELECT status::text, last_error FROM outbox.handler_deliveries LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if row.0 == "dead" {
+            hd_err = row.1;
+            break;
+        }
+    }
+    let hd_err = hd_err.expect("audit row should reach dead with last_error set");
+    assert!(
+        !hd_err.contains('\0'),
+        "audit last_error must not contain NUL"
+    );
+    assert!(
+        !hd_err.contains('\x1b'),
+        "audit last_error must not contain ESC"
+    );
+    assert!(
+        hd_err.contains("panic:"),
+        "audit last_error should preserve panic: prefix, got {hd_err:?}"
+    );
+
+    // pgwq.jobs.last_error must also be sanitized — if our JobError::abort
+    // had carried the raw NUL, pgwq's mark_dead write would have hit
+    // SQLSTATE 22021 and the worker would loop.
+    let pgwq_err: Option<String> = sqlx::query_scalar(
+        "SELECT last_error FROM pgwq.jobs WHERE queue = 'outbox_handler_deliveries' LIMIT 1",
     )
     .fetch_one(&pool)
     .await
     .unwrap();
-    assert_eq!(running, 0);
+    let pgwq_err = pgwq_err.expect("pgwq.jobs.last_error should be set");
+    assert!(
+        !pgwq_err.contains('\0'),
+        "pgwq last_error must not contain NUL"
+    );
+    assert!(
+        !pgwq_err.contains('\x1b'),
+        "pgwq last_error must not contain ESC"
+    );
+
+    let _ = handle.shutdown(Duration::from_secs(3)).await;
+}
+
+struct NulRetryHandler;
+impl EventHandler<Ev> for NulRetryHandler {
+    async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
+        Err(HandlerError::retry("nul:\0 ansi:\x1b[31m"))
+    }
+}
+
+/// Handler-emitted retry reason with NUL/ANSI — user code is untrusted, the
+/// crate must sanitize at the boundary before the string reaches either
+/// audit or pgwq `last_error`. Same invariants as the panic test above.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn handler_retry_with_nul_reason_terminalizes_safely() {
+    let (_c, pool) = common::pg_container().await;
+    pg_work_queue::migrator().run(&pool).await.unwrap();
+    rust_events::migrator().run(&pool).await.unwrap();
+
+    let cfg = OutboxConfig::builder()
+        .poll_interval(Duration::from_millis(100))
+        .concurrency(1)
+        .max_attempts(1)
+        .lease_timeout(Duration::from_secs(5))
+        .handler_timeout(Duration::from_secs(2))
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool.clone())
+        .config(cfg)
+        .register_handler::<Ev, _>("r", NulRetryHandler)
+        .build()
+        .unwrap();
+    let handle = outbox.start().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    for _ in 0..50 {
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let status: String =
+            sqlx::query_scalar("SELECT status::text FROM outbox.handler_deliveries LIMIT 1")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        if status == "dead" {
+            break;
+        }
+    }
+
+    let pgwq_err: Option<String> = sqlx::query_scalar(
+        "SELECT last_error FROM pgwq.jobs WHERE queue = 'outbox_handler_deliveries' LIMIT 1",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let pgwq_err = pgwq_err.expect("pgwq.jobs.last_error should be set");
+    assert!(!pgwq_err.contains('\0'));
+    assert!(!pgwq_err.contains('\x1b'));
 
     let _ = handle.shutdown(Duration::from_secs(3)).await;
 }
@@ -280,12 +459,11 @@ async fn panic_policy_retry_exhausted_terminalizes_to_dead() {
     }
     assert_eq!(final_status, "dead");
 
-    let running: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let running: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(running, 0);
 
     let _ = handle.shutdown(Duration::from_secs(3)).await;

@@ -17,7 +17,6 @@ impl DomainEvent for NewEv {
 }
 
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<NewEv> for H {
     async fn handle(&self, _: &NewEv, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -74,12 +73,11 @@ async fn m2_loose_handler_added_later_eventually_handled() {
     // must remain status='queued', attempts=0 throughout.
     tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let row: (String, i32) = sqlx::query_as(
-        "SELECT status::text, attempts FROM outbox.handler_deliveries LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let row: (String, i32) =
+        sqlx::query_as("SELECT status::text, attempts FROM outbox.handler_deliveries LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(row.0, "queued", "loose mode must leave status='queued'");
     assert_eq!(
         row.1, 0,
@@ -103,11 +101,12 @@ async fn m2_loose_handler_added_later_eventually_handled() {
     let h_c = outbox_c.start().await.unwrap();
 
     for _ in 0..30 {
-        let sent: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='sent'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let sent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='sent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         if sent == 1 {
             break;
         }
@@ -161,11 +160,12 @@ async fn m2_strict_handler_missing_dead_immediately() {
     let h = strict.start().await.unwrap();
 
     for _ in 0..30 {
-        let dead: i64 =
-            sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='dead'")
-                .fetch_one(&pool)
-                .await
-                .unwrap();
+        let dead: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='dead'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
         if dead == 1 {
             break;
         }

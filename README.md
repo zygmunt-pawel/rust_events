@@ -8,10 +8,10 @@ Full design rationale: `docs/superpowers/specs/2026-05-13-rust-events-design.md`
 
 ## Status
 
-- Version: `0.1.0` (pre-publish)
+- Version: `0.2.0` (pre-publish)
 - Requires: PostgreSQL 18+ (uses `uuidv7()` native), Rust 1.88+
 - License: MIT
-- Depends on: `pg_work_queue` v0.1.1 (tag-pinned via git; the v0.1.1 fix `set_ignore_missing(true)` in the migrator is load-bearing for the `_sqlx_migrations` coexistence story)
+- Depends on: `pg_work_queue` v0.1.3 (tag-pinned via git; v0.1.1's `set_ignore_missing(true)` migrator coexistence is load-bearing, v0.1.3 adds Drop-aborts handle + fatal-classifier escalation)
 
 This crate is production-ready for modular monolith workloads on Postgres 18. Neither `rust_events` nor `pg_work_queue` is yet published to crates.io; reference both via git dependency.
 
@@ -60,10 +60,9 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.1.0" }
-pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.1" }
+rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.2.0" }
+pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.3" }
 sqlx = { version = "=0.8.6", features = ["postgres", "runtime-tokio-rustls", "migrate"] }
-async-trait = "=0.1.83"
 serde = { version = "=1.0.228", features = ["derive"] }
 ```
 
@@ -100,7 +99,6 @@ use rust_events::{EventHandler, HandlerContext, HandlerError};
 
 struct Auditor;
 
-#[async_trait::async_trait]
 impl EventHandler<OrderCreated> for Auditor {
     async fn handle(
         &self,
@@ -240,9 +238,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 **At-least-once delivery.** `pg_work_queue` is a polling queue; polling queues cannot guarantee exactly-once execution. The lease + reaper mechanism means a job can be re-claimed if a worker crashes mid-execution. Your handler may run more than once for the same delivery.
 
-Make your handlers idempotent:
-- Use `ctx.delivery_key` (a stable UUID across retries of the same delivery) as an `Idempotency-Key` header on outbound HTTP calls.
-- Use `ctx.dispatch_idempotency_key` when dedup must align with the domain-level concept ("the order with this business key was already processed"), not just retry dedup.
+A non-exhaustive list of re-invocation paths:
+- **Handler explicitly retries.** `HandlerError::Retry` / `Retry { retry_in }` — the standard, intended case.
+- **Handler panics or exceeds `handler_timeout`.** Our `handle_envelope` wrap catches both via `tokio::time::timeout` + `FutureExt::catch_unwind` and routes through `mark_awaiting_retry_fenced` (panic policy `Retry`) or `mark_dead_fenced` (panic policy `Dead`).
+- **Worker crashes mid-handler.** Lease expires after `lease_timeout`; pgwq's reaper requeues the job. The new worker stamps a fresh `lease_token`, re-stamps the audit row at `status='running'`, and re-invokes the handler.
+- **Handler returned `Ok(())` but `mark_sent_fenced` failed transiently.** The audit row stays at `status='running'` and pgwq retries the job. The CTE in step ② accepts re-claim of `'running'` rows (`status NOT IN ('sent','dead','skipped')`) and re-stamps the lease — the handler runs again. Failure modes that hit this: pool exhaustion (`PoolTimedOut`/`PoolClosed`) after the handler returned, connectivity blips on the mark UPDATE, transient PG errors classified non-deterministic by `is_sqlx_deterministic`. Symptom: `rust_events.audit.mark_pool_starved` tracing (when the trigger is pool starvation) preceding a duplicate handler invocation.
+
+The takeaway: handler idempotency must hold even when the handler "succeeded last time" from its own POV. Use:
+- `ctx.delivery_key` (a stable UUID across retries of the same delivery) as an `Idempotency-Key` header on outbound HTTP calls.
+- `ctx.dispatch_idempotency_key` when dedup must align with the domain-level concept ("the order with this business key was already processed"), not just retry dedup.
 
 The two values are distinct:
 - `delivery_key`: a per-handler UUID assigned by `pg_work_queue` at push time. Stable across retries. Different per handler (H1 and H2 for the same event each get their own `delivery_key`).
@@ -413,8 +417,12 @@ All instrumentation is via `tracing`. No metrics endpoint. Build a `tracing::Lay
 | `rust_events.worker.audit_missing` | ERROR | `handler_deliveries` row missing — audit corruption |
 | `rust_events.worker.audit_inconsistent` | ERROR | Non-terminal row failed UPDATE unexpectedly |
 | `rust_events.audit.fenced_out` | WARN | `mark_*` returned `rows_affected=0` — stale worker |
+| `rust_events.audit.mark_pool_starved` | WARN | `mark_*_fenced` failed on `PoolTimedOut`/`PoolClosed`/`Io` — see Known Limitations #7 |
+| `rust_events.start.current_thread_runtime` | WARN | `Outbox::start` on a `current_thread` runtime with `concurrency > 1` |
 | `rust_events.history` | DEBUG span | Around history queries |
 | `rust_events.purge` | DEBUG span | Around purge functions |
+
+**Worker self-shutdown.** `pg_work_queue` v0.1.3+ tracks consecutive non-fatal `claim_batch` errors (TLS, network, pool config) and after `MAX_CONSECUTIVE_CLAIM_ERRORS = 30` ticks in a row escalates the most recent error to `last_fatal`. `OutboxHandle::shutdown` then surfaces `ShutdownError::Pgwq(pg_work_queue::ShutdownError::Fatal(_))` — supervising restart loops can react instead of watching `warn!` forever. The counter resets on any successful claim (including empty results).
 
 **Common span fields:** `event_id`, `event_type`, `handler_id`, `tenant_id`, `producer_bc`, `attempt`, `max_attempts`, `idempotency_key_set` (bool, not the value), `outcome`, `deliveries`, `prev_status`.
 
@@ -461,9 +469,11 @@ Both pgwq mechanisms cancel / flip `pgwq.jobs` *without* calling our handler clo
 
 4. **Minor status drift between `pgwq.jobs` and `handler_deliveries` after a crash.** If a worker crashes between `mark_dead_fenced` and `pg_work_queue`'s own `mark_done`, the reaper re-queues the job. The next worker sees `handler_deliveries.status='dead'` (terminal), returns `Ok`, and `pg_work_queue` marks the job done. The `pgwq.jobs` row ends up `done` while our row is `dead`. Both are terminal; the at-least-once contract is satisfied. The reverse (pgwq `dead`, our `sent`) is prevented by fencing.
 
-5. **Loose handler-lookup mode retries on missing registry entries.** If a new handler is never deployed, jobs exhaust `max_attempts` and become dead in `pg_work_queue`. Detection: poll `History::stuck_unregistered_handlers(threshold)` on a schedule — it returns `(event_id, handler_id, resolve_attempts, last_resolve_attempt_at)` for every row with `status='queued'` AND `resolve_attempts >= threshold`. The counter is bumped on every loose-mode worker claim, so the SELECT is a single-query diagnostic independent of tracing retention. Switch to `strict_handler_lookup=true` once the deploy is stable, or also alert on the `rust_events.worker.handler_missing` tracing event.
+5. **Loose handler-lookup mode retries on missing registry entries.** If a new handler is never deployed, jobs exhaust `max_attempts` and become `dead` in `pg_work_queue`, BUT the `outbox.handler_deliveries` audit row stays at `status='queued'` indefinitely. This asymmetry is intentional — loose mode is for rolling deploys where a replica without the handler should NOT advance the audit state, so a replica WITH the handler can still pick the job up. The downside is that once `pgwq.jobs.status='dead'`, the audit row will never reach a terminal state on its own; an operator who deploys the handler later must manually push a fresh `pg_work_queue` job (replay tool) to re-deliver. Detection: poll `History::stuck_unregistered_handlers(threshold)` on a schedule — it returns `(event_id, handler_id, resolve_attempts, last_resolve_attempt_at)` for every row with `status='queued'` AND `resolve_attempts >= threshold`. The counter is bumped on every loose-mode worker claim, so the SELECT is a single-query diagnostic independent of tracing retention. Switch to `strict_handler_lookup=true` once the deploy is stable, or also alert on the `rust_events.worker.handler_missing` tracing event.
 
 6. **`HandlerError::{Retry,Skip,Abort}::reason` is durable and operator-visible.** Reason strings are persisted in `outbox.handler_deliveries.last_error` AND `pgwq.jobs.last_error`, and surface in operator logs and tracing. Do NOT format payload values, user PII (emails, names, tokens), or other sensitive data into the reason. Prefer enum-like categories — `"upstream_5xx"`, `"rate_limited"`, `"feature_flag_off"`. For detail, use `tracing::error!()` from inside the handler instead; tracing has its own retention policy distinct from the audit columns. Reason strings are sanitized for control characters and ANSI escapes (NUL → `?`, etc.) before storage and truncated to 8 KiB.
+
+7. **Connection-pool sizing.** `pg_work_queue` enforces `pool.options().get_max_connections() >= concurrency × 2 + 2` at `start()`. That covers the worker's own use: one connection for the user handler (claim path) and one for `mark_*_fenced` per concurrent job, plus two for poll and reaper. Anything else hitting the same pool — `Outbox::dispatch` inside user request-handling code, `History::*` queries, `purge_*` sweepers, the `OutboxHandle::shutdown` pending-count query — competes for whatever slack you size above that minimum. When the pool is exhausted, `mark_*_fenced` can fail with `sqlx::Error::PoolTimedOut` BEFORE pgwq's outer `handler_timeout` cancels the wrapper; the audit row then stays `'running'` with our `lease_token` set until pgwq's reaper reclaims it (default `lease_timeout = 300s`). Symptom: a spike of `rust_events.audit.mark_pool_starved` warn-tracing events. Mitigation: size `max_connections >= concurrency × 2 + 2 + (peak concurrent dispatch/history/purge connections on this pool)`. If you have unrelated traffic on the pool, an even higher floor is appropriate.
 
 ---
 

@@ -25,13 +25,8 @@ impl DomainEvent for OrderShipped {
 #[derive(Clone)]
 struct Counter(Arc<AtomicUsize>);
 
-#[async_trait::async_trait]
 impl EventHandler<OrderShipped> for Counter {
-    async fn handle(
-        &self,
-        _: &OrderShipped,
-        _: &HandlerContext,
-    ) -> Result<(), HandlerError> {
+    async fn handle(&self, _: &OrderShipped, _: &HandlerContext) -> Result<(), HandlerError> {
         self.0.fetch_add(1, Ordering::SeqCst);
         Ok(())
     }

@@ -15,7 +15,6 @@ impl DomainEvent for EmptyTypeEvent {
     const EVENT_TYPE: &'static str = "";
 }
 struct NoopHandler;
-#[async_trait::async_trait]
 impl EventHandler<EmptyTypeEvent> for NoopHandler {
     async fn handle(&self, _: &EmptyTypeEvent, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -27,13 +26,22 @@ struct LongTypeEvent;
 impl DomainEvent for LongTypeEvent {
     // 129 bytes — one over the limit (12*10 + 9 = 129).
     const EVENT_TYPE: &'static str = concat!(
-        "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa",
-        "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaaa",
-        "aaaaaaaaaa", "aaaaaaaaaa", "aaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaaa",
+        "aaaaaaaaa",
     );
 }
 struct NoopHandler2;
-#[async_trait::async_trait]
 impl EventHandler<LongTypeEvent> for NoopHandler2 {
     async fn handle(&self, _: &LongTypeEvent, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())

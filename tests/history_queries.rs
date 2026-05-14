@@ -18,7 +18,6 @@ impl DomainEvent for Ev {
 }
 
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<Ev> for H {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())

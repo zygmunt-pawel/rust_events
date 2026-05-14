@@ -1,0 +1,53 @@
+version: 2
+updates:
+  # Keep workflow action versions current. Pure-win automation: GH
+  # Actions versions get security patches, this just opens PRs.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: '07:00'
+      timezone: Europe/Warsaw
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - github-actions
+    commit-message:
+      prefix: ci
+      include: scope
+    ignore:
+      # `dtolnay/rust-toolchain` uses tags that name a Rust toolchain
+      # (`stable`, `nightly`, `1.88`), not action versions. Dependabot
+      # mis-reads `1.85 → 1.100` etc. as semver bumps; we manage the
+      # MSRV pin manually via Cargo.toml `package.rust-version` and the
+      # MSRV CI job. Update this action only when bumping MSRV.
+      - dependency-name: dtolnay/rust-toolchain
+
+  # Cargo crates — daily check. `Cargo.toml` uses exact-version pins
+  # (`=0.8.6`, `=1.52.3`, …); Dependabot honors the `=` operator and
+  # rewrites the pin to the new exact version (e.g. `=0.8.6` → `=0.8.7`),
+  # so the supply-chain posture is preserved while we get a PR per bump.
+  #
+  # `pg_work_queue` is a git-tag dep (not on crates.io); Dependabot
+  # does NOT auto-bump those — track the upstream repo's releases
+  # manually and update the tag.
+  #
+  # Cross-checked by:
+  #   - `audit.yml` cargo-deny cron (every 6h) — known RustSec advisories
+  #     fail CI even when no PR is open.
+  #   - `deny.toml` `[bans] wildcards = "deny"` — a Dependabot PR can
+  #     never relax an `=` pin to `^x.y`; that would fail audit.
+  - package-ecosystem: cargo
+    directory: /
+    schedule:
+      interval: daily
+      time: '06:00'
+      timezone: Europe/Warsaw
+    open-pull-requests-limit: 10
+    labels:
+      - dependencies
+      - rust
+    commit-message:
+      prefix: deps
+      include: scope

@@ -20,13 +20,8 @@ impl DomainEvent for TenantEvent {
 
 struct SkipHandler;
 
-#[async_trait::async_trait]
 impl EventHandler<TenantEvent> for SkipHandler {
-    async fn handle(
-        &self,
-        _: &TenantEvent,
-        _: &HandlerContext,
-    ) -> Result<(), HandlerError> {
+    async fn handle(&self, _: &TenantEvent, _: &HandlerContext) -> Result<(), HandlerError> {
         Err(HandlerError::skip("not for this tenant"))
     }
 }
