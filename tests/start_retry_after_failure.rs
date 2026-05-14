@@ -4,7 +4,8 @@
 mod common;
 
 use rust_events::{
-    DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder, StartError,
+    DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions, OutboxBuilder,
+    StartError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +31,7 @@ async fn start_after_failure_does_not_return_already_started() {
     rust_events::migrator().run(&pool).await.unwrap();
 
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ping, _>("h", H)
+        .register_handler::<Ping, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
 

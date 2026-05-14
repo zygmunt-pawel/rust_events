@@ -7,7 +7,7 @@
 //! ```no_run
 //! use rust_events::{
 //!     DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-//!     OutboxBuilder,
+//!     HandlerOptions, OutboxBuilder,
 //! };
 //! use serde::{Deserialize, Serialize};
 //! use std::time::Duration;
@@ -36,7 +36,7 @@
 //! rust_events::migrator().run(&pool).await?;
 //!
 //! let outbox = OutboxBuilder::new(pool.clone())
-//!     .register_handler::<OrderCreated, _>("audit", Auditor)
+//!     .register_handler::<OrderCreated, _>("audit", Auditor, HandlerOptions::new())
 //!     .build()?;
 //!
 //! let handle = outbox.start().await?;
@@ -81,7 +81,8 @@ pub(crate) mod runtime;
 
 pub mod builder;
 pub use crate::builder::{
-    BackoffPolicy, DecodeStrategy, OutboxBuilder, OutboxConfig, OutboxConfigBuilder, PanicPolicy,
+    BackoffPolicy, DecodeStrategy, HandlerOptions, OutboxBuilder, OutboxConfig,
+    OutboxConfigBuilder, PanicPolicy,
 };
 
 pub mod handle;

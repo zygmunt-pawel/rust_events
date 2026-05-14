@@ -28,6 +28,53 @@ pub enum DecodeStrategy {
     Abort,
 }
 
+/// Per-handler registration options. Every field is optional; an unset field
+/// falls back to the corresponding global [`OutboxConfig`] value.
+///
+/// This is a plain options value-bag, not a validating builder like
+/// [`OutboxConfigBuilder`] — it has no `build()` and no cross-field rules
+/// (per-handler bounds are checked against the global config at
+/// [`OutboxBuilder::build`], which is the only place both values are known).
+/// It still follows the crate's `const fn` setter / `#[must_use]` convention.
+/// Currently the only knob is
+/// [`handler_timeout`](HandlerOptions::handler_timeout).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandlerOptions {
+    /// Per-handler `handler_timeout` override; `None` ⇒ use the global value.
+    /// Private — only read inside this module (`register_handler`, `build`).
+    handler_timeout: Option<Duration>,
+}
+
+impl HandlerOptions {
+    /// Options with every field unset — behaves identically to the global config.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            handler_timeout: None,
+        }
+    }
+
+    /// Override the wall-clock budget for a single invocation of *this*
+    /// handler.
+    ///
+    /// Must be `> 2 × HANDLER_CLEANUP_BUDGET` (i.e. `> 400 ms`) and
+    /// `<= OutboxConfig::handler_timeout`: the global timeout is a hard
+    /// ceiling because it is the single value `pg_work_queue`'s worker-wide
+    /// outer cancellation (and lease math) uses, so a per-handler value may
+    /// only *match or tighten* the global budget. Validated at
+    /// [`OutboxBuilder::build`]; a violation is [`BuildError::ConfigInvalid`].
+    ///
+    /// Note the effective handler budget is `d - HANDLER_CLEANUP_BUDGET`
+    /// (≈ `d - 200 ms`): the crate reserves the tail of the window for its own
+    /// `mark_*_fenced` audit write. A `d` near the 400 ms floor leaves a very
+    /// small actual budget.
+    #[must_use]
+    pub const fn handler_timeout(mut self, d: Duration) -> Self {
+        self.handler_timeout = Some(d);
+        self
+    }
+}
+
 /// Configuration for the `Outbox` runtime. Build with [`OutboxConfig::builder()`].
 #[derive(Debug, Clone)]
 pub struct OutboxConfig {
@@ -194,6 +241,7 @@ struct PendingHandler {
     event_type: &'static str,
     handler_id: String,
     handler: Arc<dyn ErasedHandler>,
+    handler_timeout: Option<Duration>,
 }
 
 impl OutboxBuilder {
@@ -217,8 +265,17 @@ impl OutboxBuilder {
 
     /// Register a handler. Takes ownership of `handler` and wraps it in an
     /// `Arc<TypedHandler<E, H>>` internally — callers must **not** pre-wrap.
+    ///
+    /// `options` carries per-handler overrides (see [`HandlerOptions`]); pass
+    /// `HandlerOptions::new()` for a handler that should use the global
+    /// [`OutboxConfig`] verbatim.
     #[must_use]
-    pub fn register_handler<E, H>(mut self, handler_id: impl Into<String>, handler: H) -> Self
+    pub fn register_handler<E, H>(
+        mut self,
+        handler_id: impl Into<String>,
+        handler: H,
+        options: HandlerOptions,
+    ) -> Self
     where
         E: DomainEvent,
         H: EventHandler<E>,
@@ -232,6 +289,7 @@ impl OutboxBuilder {
             event_type: E::EVENT_TYPE,
             handler_id: handler_id.into(),
             handler: erased,
+            handler_timeout: options.handler_timeout,
         });
         self
     }
@@ -282,7 +340,7 @@ impl OutboxBuilder {
                 entry.handler_id,
                 RegisteredHandler {
                     handler: entry.handler,
-                    handler_timeout: None,
+                    handler_timeout: entry.handler_timeout,
                 },
             );
         }
@@ -295,5 +353,32 @@ impl OutboxBuilder {
             registry,
             self.allow_no_handlers,
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::HandlerOptions;
+    use std::time::Duration;
+
+    #[test]
+    fn handler_options_records_timeout_override() {
+        let o = HandlerOptions::new().handler_timeout(Duration::from_secs(180));
+        assert_eq!(o.handler_timeout, Some(Duration::from_secs(180)));
+    }
+
+    #[test]
+    fn handler_options_default_has_no_override() {
+        assert_eq!(HandlerOptions::default().handler_timeout, None);
+        assert_eq!(HandlerOptions::new().handler_timeout, None);
+    }
+
+    #[test]
+    fn handler_options_last_timeout_wins() {
+        let o = HandlerOptions::new()
+            .handler_timeout(Duration::from_secs(1))
+            .handler_timeout(Duration::from_secs(2));
+        assert_eq!(o.handler_timeout, Some(Duration::from_secs(2)));
     }
 }

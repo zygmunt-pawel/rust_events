@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -35,7 +35,7 @@ async fn loose_mode_claim_bumps_resolve_attempts() {
 
     // Dispatcher with handler registered — produces the audit row + pgwq job.
     let dispatcher = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ev, _>("h", H)
+        .register_handler::<Ev, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
     let mut tx = pool.begin().await.unwrap();
@@ -99,7 +99,7 @@ async fn stuck_unregistered_handlers_filters_by_threshold() {
     rust_events::migrator().run(&pool).await.unwrap();
 
     let dispatcher = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ev, _>("h", H)
+        .register_handler::<Ev, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
     let mut tx = pool.begin().await.unwrap();

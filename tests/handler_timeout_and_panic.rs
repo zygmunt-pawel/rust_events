@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     BackoffPolicy, DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig, PanicPolicy,
+    HandlerOptions, OutboxBuilder, OutboxConfig, PanicPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -59,6 +59,7 @@ async fn handler_timeout_terminalizes_to_dead() {
             SleepyHandler {
                 delay: Duration::from_secs(10),
             },
+            HandlerOptions::new(),
         )
         .build()
         .unwrap();
@@ -141,6 +142,7 @@ async fn panic_policy_retry_recovers_on_next_attempt() {
             PanicOnceHandler {
                 calls: calls.clone(),
             },
+            HandlerOptions::new(),
         )
         .build()
         .unwrap();
@@ -209,7 +211,7 @@ async fn panic_policy_dead_terminalizes_immediately() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", AlwaysPanicHandler)
+        .register_handler::<Ev, _>("p", AlwaysPanicHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -285,7 +287,7 @@ async fn panic_with_nul_and_ansi_terminalizes_safely() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", NulPanicHandler)
+        .register_handler::<Ev, _>("p", NulPanicHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -373,7 +375,7 @@ async fn handler_retry_with_nul_reason_terminalizes_safely() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("r", NulRetryHandler)
+        .register_handler::<Ev, _>("r", NulRetryHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -432,7 +434,7 @@ async fn panic_policy_retry_exhausted_terminalizes_to_dead() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", AlwaysPanicHandler)
+        .register_handler::<Ev, _>("p", AlwaysPanicHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();

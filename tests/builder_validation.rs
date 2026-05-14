@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    BuildError, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    BuildError, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,7 +30,7 @@ impl EventHandler<E1> for H {
 async fn empty_handler_id_rejected() {
     let (_c, pool) = common::pg_container().await;
     let err = OutboxBuilder::new(pool)
-        .register_handler::<E1, _>("", H)
+        .register_handler::<E1, _>("", H, HandlerOptions::new())
         .build()
         .unwrap_err();
     assert!(matches!(err, BuildError::HandlerIdEmpty));
@@ -41,7 +41,7 @@ async fn long_handler_id_rejected() {
     let (_c, pool) = common::pg_container().await;
     let long = "x".repeat(129);
     let err = OutboxBuilder::new(pool)
-        .register_handler::<E1, _>(long, H)
+        .register_handler::<E1, _>(long, H, HandlerOptions::new())
         .build()
         .unwrap_err();
     assert!(matches!(
@@ -54,8 +54,8 @@ async fn long_handler_id_rejected() {
 async fn duplicate_handler_id_rejected() {
     let (_c, pool) = common::pg_container().await;
     let err = OutboxBuilder::new(pool)
-        .register_handler::<E1, _>("audit", H)
-        .register_handler::<E1, _>("audit", H)
+        .register_handler::<E1, _>("audit", H, HandlerOptions::new())
+        .register_handler::<E1, _>("audit", H, HandlerOptions::new())
         .build()
         .unwrap_err();
     assert!(matches!(err, BuildError::DuplicateHandlerId { .. }));
@@ -105,7 +105,7 @@ async fn handler_timeout_just_above_cleanup_budget_accepted() {
 async fn default_config_builds() {
     let (_c, pool) = common::pg_container().await;
     let _outbox = OutboxBuilder::new(pool)
-        .register_handler::<E1, _>("audit", H)
+        .register_handler::<E1, _>("audit", H, HandlerOptions::new())
         .build()
         .unwrap();
 }

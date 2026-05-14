@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,7 @@ async fn abort_marks_dead_on_first_attempt() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<BadEvent, _>("abort_handler", AlwaysAbort)
+        .register_handler::<BadEvent, _>("abort_handler", AlwaysAbort, HandlerOptions::new())
         .build()
         .unwrap();
 

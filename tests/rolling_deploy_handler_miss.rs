@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -39,7 +39,7 @@ async fn m2_loose_handler_added_later_eventually_handled() {
     // is a belt-and-suspenders guard but not strictly required here.
     let outbox_a = OutboxBuilder::new(pool.clone())
         .allow_no_handlers(true)
-        .register_handler::<NewEv, _>("h", H)
+        .register_handler::<NewEv, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
 
@@ -95,7 +95,7 @@ async fn m2_loose_handler_added_later_eventually_handled() {
                 .build()
                 .unwrap(),
         )
-        .register_handler::<NewEv, _>("h", H)
+        .register_handler::<NewEv, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
     let h_c = outbox_c.start().await.unwrap();
@@ -134,7 +134,7 @@ async fn m2_strict_handler_missing_dead_immediately() {
     // Dispatcher registers "h" to create handler_deliveries row.
     let dispatcher = OutboxBuilder::new(pool.clone())
         .allow_no_handlers(true)
-        .register_handler::<NewEv, _>("h", H)
+        .register_handler::<NewEv, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
     let mut tx = pool.begin().await.unwrap();

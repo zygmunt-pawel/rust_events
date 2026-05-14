@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -40,7 +40,7 @@ async fn skip_marks_skipped_terminal() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<TenantEvent, _>("skip_handler", SkipHandler)
+        .register_handler::<TenantEvent, _>("skip_handler", SkipHandler, HandlerOptions::new())
         .build()
         .unwrap();
 

@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DispatchContext, DispatchError, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder,
+    HandlerOptions, OutboxBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -33,7 +33,7 @@ async fn pk_collision_classifies_as_constraint_not_retriable() {
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ev, _>("h", H)
+        .register_handler::<Ev, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
 

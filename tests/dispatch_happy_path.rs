@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DispatchContext, DispatchOutcome, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder,
+    HandlerOptions, OutboxBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -43,7 +43,7 @@ async fn setup() -> (
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<OrderCreated, _>("audit", Noop)
+        .register_handler::<OrderCreated, _>("audit", Noop, HandlerOptions::new())
         .build()
         .unwrap();
     (c, pool, outbox)
@@ -58,7 +58,7 @@ async fn setup_with_big() -> (
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<BigEvent, _>("big_audit", Noop)
+        .register_handler::<BigEvent, _>("big_audit", Noop, HandlerOptions::new())
         .build()
         .unwrap();
     (c, pool, outbox)

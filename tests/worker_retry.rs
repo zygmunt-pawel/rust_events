@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     BackoffPolicy, DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig,
+    HandlerOptions, OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -59,7 +59,11 @@ async fn retry_once_succeeds_on_attempt_2() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Flaky, _>("retry_handler", RetryOnce(attempts.clone()))
+        .register_handler::<Flaky, _>(
+            "retry_handler",
+            RetryOnce(attempts.clone()),
+            HandlerOptions::new(),
+        )
         .build()
         .unwrap();
 

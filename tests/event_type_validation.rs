@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DispatchContext, DispatchError, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder,
+    HandlerOptions, OutboxBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +55,7 @@ async fn dispatch_empty_event_type_rejected_in_rust() {
     rust_events::migrator().run(&pool).await.unwrap();
 
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<EmptyTypeEvent, _>("h", NoopHandler)
+        .register_handler::<EmptyTypeEvent, _>("h", NoopHandler, HandlerOptions::new())
         .build()
         .unwrap();
 
@@ -78,7 +78,7 @@ async fn dispatch_oversize_event_type_rejected_in_rust() {
     rust_events::migrator().run(&pool).await.unwrap();
 
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<LongTypeEvent, _>("h", NoopHandler2)
+        .register_handler::<LongTypeEvent, _>("h", NoopHandler2, HandlerOptions::new())
         .build()
         .unwrap();
 

@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DecodeStrategy, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DecodeStrategy, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -82,7 +82,7 @@ async fn m3_retry_strategy_bad_payload_eventually_dead() {
                 .build()
                 .unwrap(),
         )
-        .register_handler::<StrictShape, _>("h", OkHandler)
+        .register_handler::<StrictShape, _>("h", OkHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let h = outbox.start().await.unwrap();
@@ -140,7 +140,7 @@ async fn m3_abort_strategy_bad_payload_dead_immediately() {
                 .build()
                 .unwrap(),
         )
-        .register_handler::<StrictShape, _>("h", OkHandler)
+        .register_handler::<StrictShape, _>("h", OkHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let h = outbox.start().await.unwrap();

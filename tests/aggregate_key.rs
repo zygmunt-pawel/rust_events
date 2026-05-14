@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DispatchContext, DispatchError, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder,
+    HandlerOptions, OutboxBuilder,
 };
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -60,7 +60,7 @@ async fn aggregate_key_roundtrips_through_history() {
     rust_events::migrator().run(&pool).await.unwrap();
 
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<OrderEvent, _>("audit", H)
+        .register_handler::<OrderEvent, _>("audit", H, HandlerOptions::new())
         .build()
         .unwrap();
 

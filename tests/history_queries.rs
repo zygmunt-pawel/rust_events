@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DeliveryStatus, DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder,
+    HandlerOptions, OutboxBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -30,8 +30,8 @@ async fn history_returns_event_and_deliveries() {
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ev, _>("audit", H)
-        .register_handler::<Ev, _>("metrics", H)
+        .register_handler::<Ev, _>("audit", H, HandlerOptions::new())
+        .register_handler::<Ev, _>("metrics", H, HandlerOptions::new())
         .build()
         .unwrap();
 

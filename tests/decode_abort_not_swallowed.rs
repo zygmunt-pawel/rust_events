@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DecodeStrategy, DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig,
+    HandlerOptions, OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -55,7 +55,7 @@ async fn handler_abort_with_decode_prefix_is_not_retried() {
                 .build()
                 .unwrap(),
         )
-        .register_handler::<DecodeRequest, _>("h", AbortingHandler)
+        .register_handler::<DecodeRequest, _>("h", AbortingHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let h = outbox.start().await.unwrap();

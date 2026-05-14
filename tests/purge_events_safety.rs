@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -36,7 +36,7 @@ async fn m4_refuses_event_with_pending_delivery() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .allow_no_handlers(false)
-        .register_handler::<SafetyEv, _>("audit", Noop)
+        .register_handler::<SafetyEv, _>("audit", Noop, HandlerOptions::new())
         .build()
         .unwrap();
 
@@ -91,7 +91,7 @@ async fn m4_deletes_event_with_all_deliveries_terminal() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<SafetyEv, _>("audit", Noop)
+        .register_handler::<SafetyEv, _>("audit", Noop, HandlerOptions::new())
         .build()
         .unwrap();
 
