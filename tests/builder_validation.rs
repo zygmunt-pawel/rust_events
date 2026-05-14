@@ -3,9 +3,9 @@
 
 mod common;
 
-use async_trait::async_trait;
 use rust_events::{
-    BuildError, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder, OutboxConfig,
+    BuildError, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
+    OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -20,7 +20,6 @@ impl DomainEvent for E1 {
 
 struct H;
 
-#[async_trait]
 impl EventHandler<E1> for H {
     async fn handle(&self, _: &E1, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -68,6 +67,38 @@ async fn invalid_config_concurrency_zero() {
     drop(pool);
     let cfg_err = OutboxConfig::builder().concurrency(0).build().unwrap_err();
     assert!(matches!(cfg_err, BuildError::ConfigInvalid(_)));
+}
+
+/// `handler_timeout` at or below `2 × HANDLER_CLEANUP_BUDGET` (400 ms) leaves
+/// no margin for our `mark_*_fenced` UPDATE to land before pgwq's outer
+/// cancellation. Reject at `build()` time — defense-in-depth on top of pgwq's
+/// own `MIN_HANDLER_TIMEOUT = 1s` so an upstream relaxation can't slip
+/// through into `rust_events`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handler_timeout_below_cleanup_budget_rejected() {
+    let err = OutboxConfig::builder()
+        .handler_timeout(std::time::Duration::from_millis(400))
+        .lease_timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(err, BuildError::ConfigInvalid(ref m) if m.contains("HANDLER_CLEANUP_BUDGET")),
+        "expected ConfigInvalid mentioning HANDLER_CLEANUP_BUDGET, got {err:?}"
+    );
+}
+
+/// Just above the threshold (401 ms) — must succeed. Confirms the boundary
+/// is strict-greater-than and not strict-equals-or-greater.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn handler_timeout_just_above_cleanup_budget_accepted() {
+    let cfg = OutboxConfig::builder()
+        .handler_timeout(std::time::Duration::from_millis(401))
+        .lease_timeout(std::time::Duration::from_secs(5))
+        .build();
+    assert!(
+        cfg.is_ok(),
+        "401ms handler_timeout must pass validation: {cfg:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

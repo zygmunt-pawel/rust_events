@@ -13,7 +13,7 @@ use crate::limits;
 use crate::outcome::DispatchOutcome;
 use crate::registry::Registry;
 use crate::runtime::OutboxRuntime;
-use sqlx::{PgConnection, PgPool};
+use sqlx::PgPool;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use uuid::Uuid;
@@ -60,6 +60,14 @@ impl Outbox {
     ///
     /// # Transaction discipline
     ///
+    /// `tx` is typed as `&mut sqlx::Transaction<'_, sqlx::Postgres>` rather
+    /// than `&mut PgConnection`. The narrower type is what makes
+    /// "transactional outbox" actually transactional: with `&mut PgConnection`
+    /// a caller could legally pass `&mut pool.acquire().await?`, every
+    /// statement would autocommit, and the contract would silently break
+    /// without any compile-time signal. Requiring a `Transaction` lifts that
+    /// invariant into the type system.
+    ///
     /// On `Err`, the caller MUST roll back `tx`. Committing despite an `Err`
     /// return MAY leak `outbox.handler_deliveries` rows in `queued` state
     /// without corresponding `pg_work_queue` jobs — they will never be
@@ -84,7 +92,7 @@ impl Outbox {
     )]
     pub async fn dispatch<E: DomainEvent>(
         &self,
-        tx: &mut PgConnection,
+        tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
         ctx: &DispatchContext<'_>,
         event: &E,
     ) -> Result<DispatchOutcome, DispatchError> {
@@ -147,67 +155,80 @@ impl Outbox {
 
         // 5. Idempotency reservation (atomic; DEFERRABLE FK lets us write keys
         //    before events).
+        //
+        // Single-statement no-op upsert: `DO UPDATE SET event_id =
+        // dispatch_keys.event_id` always returns the row whether we inserted
+        // or hit the conflict. `xmax = 0` distinguishes the two — true for a
+        // freshly inserted row, false when the conflict path took over.
+        //
+        // Why not "DO NOTHING + follow-up SELECT": the follow-up window was
+        // visible to concurrent `purge_dispatch_keys` (DO NOTHING does not
+        // lock the conflicting row), so a purge between the two statements
+        // could surface as RowNotFound → caller retry → fresh INSERT under a
+        // *different* event_id, silently breaking the idempotency contract.
+        // The single statement closes the window: the upsert either inserts
+        // or holds the existing row's lock for the duration of `tx`.
         if let Some(key) = ctx.idempotency_key() {
-            let inserted: Option<(Uuid,)> = sqlx::query_as(
+            let (existing_event_id, inserted): (Uuid, bool) = sqlx::query_as(
                 "INSERT INTO outbox.dispatch_keys (tenant_id, idempotency_key, event_id)
                  VALUES ($1, $2, $3)
-                 ON CONFLICT DO NOTHING
-                 RETURNING event_id",
+                 ON CONFLICT (tenant_id, idempotency_key)
+                 DO UPDATE SET event_id = dispatch_keys.event_id
+                 RETURNING event_id, (xmax = 0) AS inserted",
             )
             .bind(ctx.tenant_id())
             .bind(key)
             .bind(event_id)
-            .fetch_optional(&mut *tx)
+            .fetch_one(&mut **tx)
             .await?;
 
-            if inserted.is_none() {
-                let (existing,): (Uuid,) = sqlx::query_as(
-                    "SELECT event_id FROM outbox.dispatch_keys
-                     WHERE tenant_id = $1 AND idempotency_key = $2",
-                )
-                .bind(ctx.tenant_id())
-                .bind(key)
-                .fetch_one(&mut *tx)
-                .await?;
+            if !inserted {
                 tracing::info!(
                     target: "rust_events.dispatch.dup",
-                    event_id = %existing,
+                    event_id = %existing_event_id,
                     "duplicate dispatch returned existing event_id"
                 );
-                return Ok(DispatchOutcome::Duplicate { event_id: existing });
+                return Ok(DispatchOutcome::Duplicate {
+                    event_id: existing_event_id,
+                });
             }
         }
 
-        // 6. INSERT outbox.events. Serialize headers once and pre-check size
+        // 6. INSERT outbox.events. Serialize headers ONCE and pre-check size
         //    to surface a typed error rather than an opaque DB CHECK violation.
-        let headers_json = serde_json::Value::Object(
-            ctx.headers().cloned().unwrap_or_default(),
-        );
-        let headers_text = serde_json::to_string(&headers_json)
-            .map_err(DispatchError::Codec)?;
+        //    Serialize the map directly (skip the redundant Value::Object
+        //    wrap that was being copied to bind a serde_json::Value, which
+        //    sqlx would then re-serialize on its way to the JSONB column).
+        //    Bind as TEXT with `$7::jsonb` PG-side cast — same wire shape,
+        //    one serialization pass.
+        let empty_map: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        let headers_ref = ctx.headers().unwrap_or(&empty_map);
+        let headers_text = serde_json::to_string(headers_ref).map_err(DispatchError::Codec)?;
         if headers_text.len() > limits::MAX_HEADERS_BYTES {
             return Err(DispatchError::HeadersTooLarge {
                 size: headers_text.len(),
                 max: limits::MAX_HEADERS_BYTES,
             });
         }
-        sqlx::query(
-            "INSERT INTO outbox.events
-                (id, event_type, producer_bc, tenant_id, aggregate_key, payload, headers)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)",
-        )
-        .bind(event_id)
-        .bind(E::EVENT_TYPE)
-        .bind(ctx.producer_bc())
-        .bind(ctx.tenant_id())
-        .bind(aggregate_key.as_deref())
-        .bind(&payload)
-        .bind(headers_json)
-        .execute(&mut *tx)
-        .await?;
-
-        // 7. No handlers + allow_no_handlers: persist event only.
+        // 7. INSERT events (+ handler_deliveries fan-out in the same CTE when
+        //    we have handlers — saves one round-trip in the user's tx).
+        //    `allow_no_handlers=true` with zero handlers takes the simple
+        //    INSERT path and returns NoHandlers; the common path merges.
         if handler_ids.is_empty() {
+            sqlx::query(
+                "INSERT INTO outbox.events
+                    (id, event_type, producer_bc, tenant_id, aggregate_key, payload, headers)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)",
+            )
+            .bind(event_id)
+            .bind(E::EVENT_TYPE)
+            .bind(ctx.producer_bc())
+            .bind(ctx.tenant_id())
+            .bind(aggregate_key.as_deref())
+            .bind(&payload)
+            .bind(&headers_text)
+            .execute(&mut **tx)
+            .await?;
             tracing::info!(
                 target: "rust_events.dispatch.empty",
                 event_id = %event_id,
@@ -217,16 +238,32 @@ impl Outbox {
             return Ok(DispatchOutcome::NoHandlers { event_id });
         }
 
-        // 8. Multi-row INSERT handler_deliveries.
-        let handler_id_array: Vec<&str> =
-            handler_ids.iter().map(String::as_str).collect();
+        // 8. CTE merge: INSERT events + multi-row INSERT handler_deliveries
+        //    in a single statement. PG's "WITH ... RETURNING" sees the
+        //    modifying CTE's row in the main INSERT — handler_deliveries.event_id
+        //    references the events row that was just created. The non-deferrable
+        //    FK is satisfied because the events row is visible inside the
+        //    same statement.
+        let handler_id_array: Vec<&str> = handler_ids.iter().map(String::as_str).collect();
         sqlx::query(
-            "INSERT INTO outbox.handler_deliveries (event_id, handler_id)
-             SELECT $1, unnest($2::text[])",
+            "WITH ev AS (
+                INSERT INTO outbox.events
+                    (id, event_type, producer_bc, tenant_id, aggregate_key, payload, headers)
+                VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)
+                RETURNING id
+            )
+            INSERT INTO outbox.handler_deliveries (event_id, handler_id)
+            SELECT ev.id, unnest($8::text[]) FROM ev",
         )
         .bind(event_id)
+        .bind(E::EVENT_TYPE)
+        .bind(ctx.producer_bc())
+        .bind(ctx.tenant_id())
+        .bind(aggregate_key.as_deref())
+        .bind(&payload)
+        .bind(&headers_text)
         .bind(&handler_id_array)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
 
         // 9. Push N jobs to pg_work_queue.
@@ -238,7 +275,7 @@ impl Outbox {
             })
             .collect();
         pg_work_queue::Pusher::new(PGWQ_QUEUE)
-            .push_batch(&mut *tx, &envelopes)
+            .push_batch(tx, &envelopes)
             .await?;
 
         tracing::debug!(
@@ -290,6 +327,28 @@ impl Outbox {
             return Err(StartError::AlreadyStarted);
         }
 
+        // Current-thread tokio runtime + concurrency > 1 means all worker
+        // handlers, the poll loop, the reaper, and the timer wheel share a
+        // single OS thread. CPU-bound or sync-blocking handlers will starve
+        // each other and the rest of the runtime. Most outbox handlers are
+        // I/O-bound (DB writes, HTTP) so this still works, but it is rarely
+        // what the operator intended — warn loudly so the misconfiguration
+        // surfaces in logs.
+        if self.config.concurrency > 1
+            && matches!(
+                tokio::runtime::Handle::current().runtime_flavor(),
+                tokio::runtime::RuntimeFlavor::CurrentThread
+            )
+        {
+            tracing::warn!(
+                target: "rust_events.start.current_thread_runtime",
+                concurrency = self.config.concurrency,
+                "Outbox::start invoked on a current_thread tokio runtime with concurrency > 1; \
+                 all handlers will share one OS thread — switch to a multi_thread runtime \
+                 (e.g. #[tokio::main(flavor = \"multi_thread\")]) or set concurrency(1)"
+            );
+        }
+
         // RAII: if any `?` below unwinds the stack, drop releases `started`
         // so the caller (or a supervising restart loop) can retry. On
         // success we `disarm()` and `started` stays `true` for the
@@ -331,10 +390,12 @@ impl Outbox {
             .handler_timeout(self.config.handler_timeout)
             .retry_backoff(self.config.retry_backoff)
             .panic_policy(self.config.panic_policy)
-            .handler(move |env: HandlerEnvelope, ctx: pg_work_queue::JobContext| {
-                let runtime = runtime_for_handler.clone();
-                async move { runtime.handle_envelope(env, ctx).await }
-            })
+            .handler(
+                move |env: HandlerEnvelope, ctx: pg_work_queue::JobContext| {
+                    let runtime = runtime_for_handler.clone();
+                    async move { runtime.handle_envelope(env, ctx).await }
+                },
+            )
             .build()?
             .start()
             .await?;

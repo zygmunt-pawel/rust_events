@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
+    OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -38,7 +38,6 @@ enum GateResult {
     Abort,
 }
 
-#[async_trait::async_trait]
 impl EventHandler<Ev> for Gated {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         self.started.notify_one();
@@ -155,12 +154,16 @@ async fn b1_gated_fencing_race(
     // This changes lease_token=NULL, so handle_envelope's mark_*_fenced
     // (called after we unblock the handler) will find 0 rows and be fenced out.
     let inject_sql = match injected_status {
-        "sent" => "UPDATE outbox.handler_deliveries \
+        "sent" => {
+            "UPDATE outbox.handler_deliveries \
                    SET status='sent', finished_at=now(), lease_token=NULL, last_error=NULL \
-                   WHERE status='running'",
-        "dead" => "UPDATE outbox.handler_deliveries \
+                   WHERE status='running'"
+        }
+        "dead" => {
+            "UPDATE outbox.handler_deliveries \
                    SET status='dead', finished_at=now(), lease_token=NULL, last_error='injected' \
-                   WHERE status='running'",
+                   WHERE status='running'"
+        }
         other => panic!("unknown injected_status: {other}"),
     };
     let n = sqlx::query(inject_sql)
@@ -176,12 +179,11 @@ async fn b1_gated_fencing_race(
     // Give handle_envelope time to attempt its (fenced) mark_*_fenced and finish.
     tokio::time::sleep(Duration::from_secs(2)).await;
 
-    let final_status: String = sqlx::query_scalar(
-        "SELECT status::text FROM outbox.handler_deliveries LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let final_status: String =
+        sqlx::query_scalar("SELECT status::text FROM outbox.handler_deliveries LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(
         final_status, expected_final_status,
         "fencing should preserve the injected terminal verdict, not the handler's result"
@@ -299,12 +301,11 @@ async fn attempts_never_regress_across_fence_out() {
     .await
     .unwrap();
 
-    let post: i32 = sqlx::query_scalar(
-        "SELECT attempts FROM outbox.handler_deliveries WHERE event_id=$1",
-    )
-    .bind(event_id)
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let post: i32 =
+        sqlx::query_scalar("SELECT attempts FROM outbox.handler_deliveries WHERE event_id=$1")
+            .bind(event_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(post, 7, "attempts must not regress (GREATEST invariant)");
 }

@@ -25,7 +25,6 @@ type Captured = Arc<Mutex<Vec<(Uuid, Option<String>)>>>;
 #[derive(Clone)]
 struct Capture(Captured);
 
-#[async_trait::async_trait]
 impl EventHandler<Ev> for Capture {
     async fn handle(&self, _: &Ev, ctx: &HandlerContext) -> Result<(), HandlerError> {
         self.0

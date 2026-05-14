@@ -53,10 +53,7 @@ pub async fn purge_terminal_deliveries(
 ///
 /// Returns [`PurgeError::Sqlx`] if any database operation fails.
 #[tracing::instrument(skip(pool), target = "rust_events.purge")]
-pub async fn purge_dispatch_keys(
-    pool: &PgPool,
-    older_than: Duration,
-) -> Result<u64, PurgeError> {
+pub async fn purge_dispatch_keys(pool: &PgPool, older_than: Duration) -> Result<u64, PurgeError> {
     let cutoff = cutoff_from(older_than);
     let mut total = 0u64;
     loop {
@@ -87,18 +84,17 @@ pub async fn purge_dispatch_keys(
 }
 
 /// Safe purge: only deletes events whose ALL deliveries are terminal
-/// (sent/dead/skipped). Recommended ordering: call
-/// `purge_terminal_deliveries` + `purge_dispatch_keys` BEFORE this so the
-/// NOT EXISTS predicate can find candidates.
+/// (sent/dead/skipped).
+///
+/// Recommended ordering: call `purge_terminal_deliveries` +
+/// `purge_dispatch_keys` BEFORE this so the NOT EXISTS predicate can find
+/// candidates.
 ///
 /// # Errors
 ///
 /// Returns [`PurgeError::Sqlx`] if any database operation fails.
 #[tracing::instrument(skip(pool), target = "rust_events.purge")]
-pub async fn purge_events(
-    pool: &PgPool,
-    older_than: Duration,
-) -> Result<u64, PurgeError> {
+pub async fn purge_events(pool: &PgPool, older_than: Duration) -> Result<u64, PurgeError> {
     let cutoff = cutoff_from(older_than);
     let mut total = 0u64;
     loop {
@@ -134,7 +130,6 @@ pub async fn purge_events(
 }
 
 fn cutoff_from(older_than: Duration) -> chrono::DateTime<Utc> {
-    let d = chrono::Duration::from_std(older_than)
-        .unwrap_or(chrono::Duration::MAX);
+    let d = chrono::Duration::from_std(older_than).unwrap_or(chrono::Duration::MAX);
     Utc::now() - d
 }

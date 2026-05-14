@@ -12,7 +12,9 @@ async fn m7_purge_signatures_no_chunk_size_argument() {
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
 
-    let a = purge_terminal_deliveries(&pool, Duration::ZERO).await.unwrap();
+    let a = purge_terminal_deliveries(&pool, Duration::ZERO)
+        .await
+        .unwrap();
     let b = purge_dispatch_keys(&pool, Duration::ZERO).await.unwrap();
     let c = purge_events(&pool, Duration::ZERO).await.unwrap();
 

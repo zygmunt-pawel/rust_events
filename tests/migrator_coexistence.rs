@@ -29,12 +29,10 @@ async fn m5_both_migrators_run_in_either_order_success() {
     .unwrap();
     assert!(outbox_exists, "outbox.events should exist");
 
-    let migration_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM _sqlx_migrations",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let migration_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert!(migration_count >= 2, "should have rows from both migrators");
 }
 

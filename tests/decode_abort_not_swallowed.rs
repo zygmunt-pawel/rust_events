@@ -24,7 +24,6 @@ impl DomainEvent for DecodeRequest {
 /// Pre-fix: runtime.rs:345-355 silently converts this to Retry. The test fails
 /// because attempts climbs and `last_error` never lands as permanent.
 struct AbortingHandler;
-#[async_trait::async_trait]
 impl EventHandler<DecodeRequest> for AbortingHandler {
     async fn handle(
         &self,

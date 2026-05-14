@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
+    OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -18,7 +18,6 @@ impl DomainEvent for Ev {
 
 struct Trip;
 
-#[async_trait::async_trait]
 impl EventHandler<Ev> for Trip {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -61,7 +60,10 @@ async fn m1_missing_row_aborts_with_audit_missing_tracing() {
         .await
         .unwrap()
         .rows_affected();
-    assert_eq!(deleted, 1, "expected to delete exactly 1 handler_deliveries row");
+    assert_eq!(
+        deleted, 1,
+        "expected to delete exactly 1 handler_deliveries row"
+    );
 
     // Now start the worker. It polls immediately (tokio::time::interval fires
     // on first tick), claims the pgwq.jobs row, finds no handler_deliveries →
@@ -93,11 +95,10 @@ async fn m1_missing_row_aborts_with_audit_missing_tracing() {
     );
 
     // No handler_deliveries rows should exist (we deleted them and no re-insert happens).
-    let delivery_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries")
-            .fetch_one(&pool)
-            .await
-            .unwrap();
+    let delivery_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
     assert_eq!(delivery_count, 0, "handler_deliveries should have 0 rows");
 
     let _ = handle.shutdown(Duration::from_secs(2)).await;

@@ -58,10 +58,7 @@ impl<'a> DispatchContext<'a> {
 
     /// Attach arbitrary key-value metadata headers to the dispatched event.
     #[must_use]
-    pub fn with_headers(
-        mut self,
-        headers: serde_json::Map<String, serde_json::Value>,
-    ) -> Self {
+    pub fn with_headers(mut self, headers: serde_json::Map<String, serde_json::Value>) -> Self {
         self.headers = Some(headers);
         self
     }

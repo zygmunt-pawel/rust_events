@@ -16,7 +16,6 @@ impl DomainEvent for Ping {
 }
 
 struct Noop;
-#[async_trait::async_trait]
 impl EventHandler<Ping> for Noop {
     async fn handle(&self, _: &Ping, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -30,10 +29,7 @@ async fn second_start_returns_already_started() {
     rust_events::migrator().run(&pool).await.unwrap();
     // concurrency=1 requires only 1*2+2=4 connections — safe with the
     // default pool (max_connections=10).
-    let cfg = OutboxConfig::builder()
-        .concurrency(1)
-        .build()
-        .unwrap();
+    let cfg = OutboxConfig::builder().concurrency(1).build().unwrap();
     let outbox = OutboxBuilder::new(pool)
         .config(cfg)
         .register_handler::<Ping, _>("audit", Noop)

@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
+    OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -17,7 +17,6 @@ impl DomainEvent for Ev {
 }
 
 struct AlwaysRetryHandler;
-#[async_trait::async_trait]
 impl EventHandler<Ev> for AlwaysRetryHandler {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         // Reason intentionally innocuous — the PII risk we test is on the
@@ -61,11 +60,7 @@ async fn pgwq_last_error_contains_no_pg_detail() {
     // into last_error, we'll detect it.
     let mut tx = pool.begin().await.unwrap();
     outbox
-        .dispatch(
-            &mut tx,
-            &DispatchContext::new("PII_TENANT_secret-001"),
-            &Ev,
-        )
+        .dispatch(&mut tx, &DispatchContext::new("PII_TENANT_secret-001"), &Ev)
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -87,20 +82,20 @@ async fn pgwq_last_error_contains_no_pg_detail() {
     // Both audit columns: outbox.handler_deliveries.last_error AND
     // pgwq.jobs.last_error. We do a defensive scan against the leak
     // signatures.
-    let outbox_last: Option<String> = sqlx::query_scalar(
-        "SELECT last_error FROM outbox.handler_deliveries LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
-    let pgwq_last: Option<String> = sqlx::query_scalar(
-        "SELECT last_error FROM pgwq.jobs LIMIT 1",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let outbox_last: Option<String> =
+        sqlx::query_scalar("SELECT last_error FROM outbox.handler_deliveries LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    let pgwq_last: Option<String> = sqlx::query_scalar("SELECT last_error FROM pgwq.jobs LIMIT 1")
+        .fetch_one(&pool)
+        .await
+        .unwrap();
 
-    for (name, val) in [("outbox.last_error", outbox_last), ("pgwq.last_error", pgwq_last)] {
+    for (name, val) in [
+        ("outbox.last_error", outbox_last),
+        ("pgwq.last_error", pgwq_last),
+    ] {
         if let Some(s) = val {
             assert!(
                 !s.contains("PII_TENANT_secret"),

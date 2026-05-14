@@ -15,7 +15,6 @@ impl DomainEvent for Ev {
     const EVENT_TYPE: &'static str = "test.hdr";
 }
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<Ev> for H {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())

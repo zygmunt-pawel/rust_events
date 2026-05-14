@@ -28,7 +28,6 @@ impl DomainEvent for BigEvent {
 
 struct Noop;
 
-#[async_trait::async_trait]
 impl<E: DomainEvent> EventHandler<E> for Noop {
     async fn handle(&self, _: &E, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -101,12 +100,11 @@ async fn dispatch_returns_dispatched_with_event_id_and_count() {
     assert_eq!(count, 1);
 
     // delivery row queued
-    let dcount: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='queued'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let dcount: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='queued'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(dcount, 1);
 }
 
@@ -127,8 +125,7 @@ async fn idempotency_duplicate_returns_existing_event_id() {
         .unwrap();
     tx.commit().await.unwrap();
     let DispatchOutcome::Dispatched {
-        event_id: first_id,
-        ..
+        event_id: first_id, ..
     } = first
     else {
         unreachable!()
@@ -190,7 +187,10 @@ async fn idempotency_same_tx_duplicate_collapses_to_one_event() {
         .dispatch(
             &mut tx,
             &DispatchContext::new("acme").with_idempotency_key("order:42"),
-            &OrderCreated { order_id: 42, amount: 100 },
+            &OrderCreated {
+                order_id: 42,
+                amount: 100,
+            },
         )
         .await
         .unwrap();
@@ -198,13 +198,19 @@ async fn idempotency_same_tx_duplicate_collapses_to_one_event() {
         .dispatch(
             &mut tx,
             &DispatchContext::new("acme").with_idempotency_key("order:42"),
-            &OrderCreated { order_id: 42, amount: 100 },
+            &OrderCreated {
+                order_id: 42,
+                amount: 100,
+            },
         )
         .await
         .unwrap();
     tx.commit().await.unwrap();
 
-    let DispatchOutcome::Dispatched { event_id: first_id, .. } = first else {
+    let DispatchOutcome::Dispatched {
+        event_id: first_id, ..
+    } = first
+    else {
         panic!("first must be Dispatched, got {first:?}");
     };
     match second {
@@ -231,7 +237,10 @@ async fn idempotency_cross_tenant_keys_do_not_conflict() {
         .dispatch(
             &mut tx_a,
             &DispatchContext::new("tenant_a").with_idempotency_key("order:42"),
-            &OrderCreated { order_id: 42, amount: 100 },
+            &OrderCreated {
+                order_id: 42,
+                amount: 100,
+            },
         )
         .await
         .unwrap();
@@ -242,17 +251,26 @@ async fn idempotency_cross_tenant_keys_do_not_conflict() {
         .dispatch(
             &mut tx_b,
             &DispatchContext::new("tenant_b").with_idempotency_key("order:42"),
-            &OrderCreated { order_id: 42, amount: 100 },
+            &OrderCreated {
+                order_id: 42,
+                amount: 100,
+            },
         )
         .await
         .unwrap();
     tx_b.commit().await.unwrap();
 
-    let (DispatchOutcome::Dispatched { event_id: id_a, .. },
-         DispatchOutcome::Dispatched { event_id: id_b, .. }) = (a, b) else {
+    let (
+        DispatchOutcome::Dispatched { event_id: id_a, .. },
+        DispatchOutcome::Dispatched { event_id: id_b, .. },
+    ) = (a, b)
+    else {
         panic!("both dispatches must be Dispatched (no cross-tenant collapse)");
     };
-    assert_ne!(id_a, id_b, "different tenants must yield different event_ids");
+    assert_ne!(
+        id_a, id_b,
+        "different tenants must yield different event_ids"
+    );
 
     let ec: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox.events")
         .fetch_one(&pool)

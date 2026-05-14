@@ -17,7 +17,6 @@ impl DomainEvent for Ev {
 }
 
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<Ev> for H {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -65,7 +64,12 @@ async fn loose_mode_claim_bumps_resolve_attempts() {
     tokio::time::sleep(Duration::from_millis(800)).await;
     let _ = handle.shutdown(Duration::from_secs(2)).await.unwrap();
 
-    let (status, attempts, resolve_attempts, last_resolve): (String, i32, i32, Option<chrono::DateTime<chrono::Utc>>) = sqlx::query_as(
+    let (status, attempts, resolve_attempts, last_resolve): (
+        String,
+        i32,
+        i32,
+        Option<chrono::DateTime<chrono::Utc>>,
+    ) = sqlx::query_as(
         "SELECT status::text, attempts, resolve_attempts, last_resolve_attempt_at
          FROM outbox.handler_deliveries LIMIT 1",
     )

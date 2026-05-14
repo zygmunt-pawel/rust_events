@@ -146,17 +146,34 @@ impl OutboxConfigBuilder {
     /// - `concurrency == 0`
     /// - `max_attempts == 0`
     /// - `handler_timeout >= lease_timeout`
+    /// - `handler_timeout <= 2 × HANDLER_CLEANUP_BUDGET` (currently 400 ms) —
+    ///   our wrap reserves `HANDLER_CLEANUP_BUDGET` at the tail of
+    ///   `handler_timeout` for `mark_*_fenced` to land before pgwq's outer
+    ///   cancellation. A `handler_timeout` near that budget would either
+    ///   collapse to the 100 ms floor (where pgwq could cancel us mid-mark)
+    ///   or leave no headroom at all. Belt-and-braces — `pg_work_queue`
+    ///   already enforces a 1 s minimum on its side, this guards against
+    ///   pgwq lowering that floor in the future.
     pub fn build(self) -> Result<OutboxConfig, BuildError> {
         if self.cfg.concurrency == 0 {
             return Err(BuildError::ConfigInvalid("concurrency must be >= 1".into()));
         }
         if self.cfg.max_attempts == 0 {
-            return Err(BuildError::ConfigInvalid("max_attempts must be >= 1".into()));
+            return Err(BuildError::ConfigInvalid(
+                "max_attempts must be >= 1".into(),
+            ));
         }
         if self.cfg.handler_timeout >= self.cfg.lease_timeout {
             return Err(BuildError::ConfigInvalid(
                 "handler_timeout must be < lease_timeout".into(),
             ));
+        }
+        let min_handler_timeout = crate::runtime::HANDLER_CLEANUP_BUDGET * 2;
+        if self.cfg.handler_timeout <= min_handler_timeout {
+            return Err(BuildError::ConfigInvalid(format!(
+                "handler_timeout must be > {min_handler_timeout:?} (2× HANDLER_CLEANUP_BUDGET) \
+                 so mark_*_fenced has headroom before pgwq's outer cancellation"
+            )));
         }
         Ok(self.cfg)
     }

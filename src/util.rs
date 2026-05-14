@@ -57,24 +57,37 @@ pub fn is_pg_constraint_violation(e: &sqlx::Error) -> bool {
 
 /// True iff `e` represents a deterministic, no-point-retrying failure.
 ///
-/// Covers four SQLSTATE classes — class `22` (data exception), `23`
-/// (integrity constraint), `28` (invalid authorization), `42` (syntax / access
-/// rule) — plus a small set of `sqlx::Error` non-database variants
-/// (`Protocol`, `TypeNotFound`, `ColumnDecode`, `Encode`, `Decode`,
-/// `Configuration`) that cannot improve under retry.
+/// Covers the SQLSTATE classes — `0A` (`feature_not_supported`), `22`
+/// (data exception), `23` (integrity constraint), `25` (invalid transaction
+/// state), `28` (invalid authorization), `3F` (`invalid_schema_name`),
+/// `42` (syntax / access rule), `44` (`with_check_option_violation`) —
+/// plus a small set of `sqlx::Error` non-database variants (`Protocol`,
+/// `TypeNotFound`, `ColumnDecode`, `Encode`, `Decode`, `Configuration`)
+/// that cannot improve under retry.
 ///
 /// Excludes classes `08` (connection exception), `40` (transaction rollback /
 /// serialization failure), `53` (insufficient resources), `57` (operator
 /// intervention), and pool/IO/TLS variants — all retriable.
+///
+/// Note on class `25`: codes like `25P02` (`in_failed_sql_transaction`) and
+/// `25006` (`read_only_sql_transaction`) cannot succeed on retry within the
+/// same connection/transaction. A caller using a connection-level retry
+/// against a primary may still recover — but at the API level retrying the
+/// same operation against the same DB session is fruitless, so the
+/// "deterministic" classification holds for the abstraction we expose.
 #[allow(dead_code)]
 pub fn is_sqlx_deterministic(e: &sqlx::Error) -> bool {
     if let sqlx::Error::Database(db) = e {
         if let Some(code) = db.code() {
             let c = code.as_ref();
-            return c.starts_with("22")
+            return c.starts_with("0A")
+                || c.starts_with("22")
                 || c.starts_with("23")
+                || c.starts_with("25")
                 || c.starts_with("28")
-                || c.starts_with("42");
+                || c.starts_with("3F")
+                || c.starts_with("42")
+                || c.starts_with("44");
         }
         return false;
     }
@@ -131,9 +144,7 @@ pub fn panic_payload_message(payload: &(dyn std::any::Any + Send)) -> String {
 /// `outbox.events.headers` should prevent these reaching us, but defense
 /// in depth.
 #[allow(dead_code)]
-pub fn parse_headers(
-    v: serde_json::Value,
-) -> serde_json::Map<String, serde_json::Value> {
+pub fn parse_headers(v: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
     match v {
         serde_json::Value::Object(m) => m,
         _ => serde_json::Map::new(),

@@ -15,7 +15,6 @@ impl DomainEvent for Ev {
     const EVENT_TYPE: &'static str = "test.classification";
 }
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<Ev> for H {
     async fn handle(&self, _: &Ev, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -100,6 +99,53 @@ async fn pool_closed_classifies_as_transient_retriable() {
         "PoolClosed must classify as Transient, got {de:?}"
     );
     assert!(de.is_retriable(), "Transient must be retriable");
+}
+
+/// `3F000` (`invalid_schema_name`) — pointing at a schema that does not exist.
+/// Must classify as deterministic. Same operator-failure shape as 42P01
+/// (forgotten migrator), routed through SQLSTATE class `3F` rather than `42`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn invalid_schema_classifies_as_constraint() {
+    let (_c, pool) = common::pg_container().await;
+
+    let err: sqlx::Error =
+        sqlx::query("SELECT 1 FROM definitely_not_a_schema.definitely_not_a_table")
+            .execute(&pool)
+            .await
+            .expect_err("missing schema must error");
+
+    let de: DispatchError = err.into();
+    assert!(
+        matches!(de, DispatchError::Constraint(_)),
+        "3F000 must classify as Constraint, got {de:?}"
+    );
+    assert!(!de.is_retriable());
+}
+
+/// `25P02` (`in_failed_sql_transaction`) — once a tx has aborted, subsequent
+/// statements on the same connection raise this code. Retrying within the
+/// same session cannot succeed; the caller must open a fresh tx.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn in_failed_tx_classifies_as_constraint() {
+    let (_c, pool) = common::pg_container().await;
+
+    let mut conn = pool.acquire().await.unwrap();
+    sqlx::query("BEGIN").execute(&mut *conn).await.unwrap();
+    // Force the tx into aborted state.
+    let _ = sqlx::query("SELECT 1 / 0").execute(&mut *conn).await;
+    // Any subsequent statement on this connection now raises 25P02.
+    let err: sqlx::Error = sqlx::query("SELECT 1")
+        .execute(&mut *conn)
+        .await
+        .expect_err("aborted tx must reject further statements");
+    let _ = sqlx::query("ROLLBACK").execute(&mut *conn).await;
+
+    let de: DispatchError = err.into();
+    assert!(
+        matches!(de, DispatchError::Constraint(_)),
+        "25P02 must classify as Constraint, got {de:?}"
+    );
+    assert!(!de.is_retriable());
 }
 
 /// `42P01` (`undefined_table`) — schema missing. Must classify as `Constraint`

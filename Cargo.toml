@@ -1,6 +1,6 @@
 [package]
 name = "rust_events"
-version = "0.1.1"
+version = "0.2.0"
 edition = "2024"
 rust-version = "1.88"
 license = "MIT"
@@ -12,7 +12,7 @@ keywords = ["outbox", "postgres", "event", "transactional", "queue"]
 categories = ["database", "asynchronous"]
 
 [dependencies]
-pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.1" }
+pg_work_queue = { version = "=0.1.3", git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.3" }
 sqlx = { version = "=0.8.6", default-features = false, features = [
     "postgres", "runtime-tokio-rustls", "uuid", "chrono", "macros", "migrate",
 ] }
@@ -23,7 +23,7 @@ serde_json = "=1.0.149"
 thiserror = "=2.0.18"
 uuid = { version = "=1.23.1", features = ["v4", "v7", "serde"] }
 chrono = { version = "=0.4.44", default-features = false, features = ["serde", "clock"] }
-async-trait = "=0.1.83"
+async-trait = "=0.1.89"
 # FutureExt::catch_unwind: lets us wrap the user handler call inside
 # handle_envelope so mark_*_fenced runs even on panic (otherwise pgwq's
 # PanicPolicy bypasses our cleanup and the audit row stays 'running').

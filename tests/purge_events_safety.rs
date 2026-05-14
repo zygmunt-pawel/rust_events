@@ -19,7 +19,6 @@ impl DomainEvent for SafetyEv {
 }
 
 struct Noop;
-#[async_trait::async_trait]
 impl EventHandler<SafetyEv> for Noop {
     async fn handle(&self, _: &SafetyEv, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -50,12 +49,11 @@ async fn m4_refuses_event_with_pending_delivery() {
     tx.commit().await.unwrap();
 
     // Verify delivery is queued (non-terminal).
-    let queued: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='queued'",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let queued: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='queued'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(queued, 1, "delivery should be queued");
 
     // purge_events with Duration::ZERO — cutoff is now, row is older, but NOT
@@ -63,7 +61,10 @@ async fn m4_refuses_event_with_pending_delivery() {
     let deleted = rust_events::purge_events(&pool, Duration::ZERO)
         .await
         .unwrap();
-    assert_eq!(deleted, 0, "purge_events must refuse event with pending delivery");
+    assert_eq!(
+        deleted, 0,
+        "purge_events must refuse event with pending delivery"
+    );
 
     // Event must still be present.
     let ec: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM outbox.events")

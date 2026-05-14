@@ -25,7 +25,6 @@ impl DomainEvent for Flaky {
 #[derive(Clone)]
 struct RetryOnce(Arc<AtomicUsize>);
 
-#[async_trait::async_trait]
 impl EventHandler<Flaky> for RetryOnce {
     async fn handle(&self, _: &Flaky, _: &HandlerContext) -> Result<(), HandlerError> {
         let attempt = self.0.fetch_add(1, Ordering::SeqCst) + 1;

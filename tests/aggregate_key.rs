@@ -47,7 +47,6 @@ impl DomainEvent for OversizeAggEvent {
 }
 
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<OrderEvent> for H {
     async fn handle(&self, _: &OrderEvent, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())
@@ -67,7 +66,11 @@ async fn aggregate_key_roundtrips_through_history() {
 
     let mut tx = pool.begin().await.unwrap();
     let outcome = outbox
-        .dispatch(&mut tx, &DispatchContext::new("t1"), &OrderEvent { order_id: 42 })
+        .dispatch(
+            &mut tx,
+            &DispatchContext::new("t1"),
+            &OrderEvent { order_id: 42 },
+        )
         .await
         .unwrap();
     tx.commit().await.unwrap();
@@ -109,12 +112,11 @@ async fn default_aggregate_key_persists_as_null() {
     assert_eq!(ev.aggregate_key, None);
 
     // Also verify the partial index is empty for this case (DB-level sanity).
-    let agg_rows: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM outbox.events WHERE aggregate_key IS NOT NULL",
-    )
-    .fetch_one(&pool)
-    .await
-    .unwrap();
+    let agg_rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.events WHERE aggregate_key IS NOT NULL")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
     assert_eq!(agg_rows, 0);
 }
 

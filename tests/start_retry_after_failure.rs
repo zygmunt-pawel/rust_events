@@ -14,7 +14,6 @@ impl DomainEvent for Ping {
     const EVENT_TYPE: &'static str = "test.ping";
 }
 struct H;
-#[async_trait::async_trait]
 impl EventHandler<Ping> for H {
     async fn handle(&self, _: &Ping, _: &HandlerContext) -> Result<(), HandlerError> {
         Ok(())

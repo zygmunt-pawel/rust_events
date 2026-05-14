@@ -90,9 +90,7 @@ impl HandlerError {
     /// `Retry-After` header from a 429, a scheduled-window restart, a
     /// rate-limit reset).
     pub fn retry_at(reason: impl Into<String>, when: DateTime<Utc>) -> Self {
-        let delay = (when - Utc::now())
-            .to_std()
-            .unwrap_or(Duration::ZERO);
+        let delay = (when - Utc::now()).to_std().unwrap_or(Duration::ZERO);
         Self::Retry {
             reason: reason.into(),
             retry_in: Some(delay),
@@ -147,16 +145,33 @@ pub struct HandlerContext {
 
 /// User-implementable async handler for a domain event.
 ///
-/// Implementations must be `Send + Sync + 'static` (stored in `Arc<dyn ...>`
-/// in the registry). Use `async_trait` macro for dyn-compatibility.
-#[async_trait::async_trait]
+/// Implementations must be `Send + Sync + 'static`. Internally the registry
+/// stores handlers behind `Arc<dyn ErasedHandler>` — a separate crate-private
+/// trait that owns the `dyn`-compatibility cost (boxed futures, type erasure)
+/// so this public trait can stay AFIT-shaped and zero-overhead for callers.
+///
+/// Just write an ordinary `impl`:
+///
+/// ```ignore
+/// impl EventHandler<MyEvent> for MyHandler {
+///     async fn handle(
+///         &self,
+///         event: &MyEvent,
+///         ctx: &HandlerContext,
+///     ) -> Result<(), HandlerError> { Ok(()) }
+/// }
+/// ```
+///
+/// No `#[async_trait]` macro required (and no `Pin<Box<dyn Future>>` per
+/// invocation). The returned future must be `Send` — the worker spawns it
+/// onto a multi-threaded executor.
 pub trait EventHandler<E: DomainEvent>: Send + Sync + 'static {
     /// Handle the given event with the provided delivery context.
-    async fn handle(
+    fn handle(
         &self,
         event: &E,
         ctx: &HandlerContext,
-    ) -> Result<(), HandlerError>;
+    ) -> impl std::future::Future<Output = Result<(), HandlerError>> + Send;
 }
 
 #[cfg(test)]
@@ -181,8 +196,7 @@ mod tests {
     #[test]
     fn retry_at_past_yields_zero_delay() {
         let when = Utc::now() - chrono::Duration::seconds(10);
-        let HandlerError::Retry { retry_in, .. } = HandlerError::retry_at("late", when)
-        else {
+        let HandlerError::Retry { retry_in, .. } = HandlerError::retry_at("late", when) else {
             panic!("expected Retry");
         };
         assert_eq!(retry_in, Some(Duration::ZERO));
@@ -190,8 +204,7 @@ mod tests {
 
     #[test]
     fn retry_at_carries_reason() {
-        let HandlerError::Retry { reason, .. } =
-            HandlerError::retry_at("rate_limited", Utc::now())
+        let HandlerError::Retry { reason, .. } = HandlerError::retry_at("rate_limited", Utc::now())
         else {
             panic!("expected Retry");
         };

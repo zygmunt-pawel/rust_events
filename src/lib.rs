@@ -21,7 +21,6 @@
 //!
 //! struct Auditor;
 //!
-//! #[async_trait::async_trait]
 //! impl EventHandler<OrderCreated> for Auditor {
 //!     async fn handle(
 //!         &self,
@@ -55,11 +54,11 @@
 //! let (_pgwq_stats, _outbox_stats) = handle.shutdown(Duration::from_secs(10)).await?;
 //! # Ok(()) }
 //! ```
-#![doc(html_root_url = "https://docs.rs/rust_events/0.1.0")]
+#![doc(html_root_url = "https://docs.rs/rust_events/0.2.0")]
 
 pub mod limits;
-pub(crate) mod util;
 pub mod migrator;
+pub(crate) mod util;
 pub use crate::migrator::migrator;
 
 pub mod handler;
