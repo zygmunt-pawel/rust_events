@@ -8,7 +8,7 @@ Full design rationale: `docs/superpowers/specs/2026-05-13-rust-events-design.md`
 
 ## Status
 
-- Version: `0.2.0` (pre-publish)
+- Version: `0.3.0` (pre-publish)
 - Requires: PostgreSQL 18+ (uses `uuidv7()` native), Rust 1.88+
 - License: MIT
 - Depends on: `pg_work_queue` v0.1.3 (tag-pinned via git; v0.1.1's `set_ignore_missing(true)` migrator coexistence is load-bearing, v0.1.3 adds Drop-aborts handle + fatal-classifier escalation)
@@ -60,7 +60,7 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.2.0" }
+rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.3.0" }
 pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.3" }
 sqlx = { version = "=0.8.6", features = ["postgres", "runtime-tokio-rustls", "migrate"] }
 serde = { version = "=1.0.228", features = ["derive"] }
