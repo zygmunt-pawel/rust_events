@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
@@ -78,8 +78,8 @@ async fn b2_two_handlers_distinct_delivery_keys_same_dispatch_key() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("h1", cap1.clone())
-        .register_handler::<Ev, _>("h2", cap2.clone())
+        .register_handler::<Ev, _>("h1", cap1.clone(), HandlerOptions::new())
+        .register_handler::<Ev, _>("h2", cap2.clone(), HandlerOptions::new())
         .build()
         .unwrap();
 
@@ -146,7 +146,7 @@ async fn b2_no_idempotency_key_dispatch_yields_none() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("h_nokey", cap.clone())
+        .register_handler::<Ev, _>("h_nokey", cap.clone(), HandlerOptions::new())
         .build()
         .unwrap();
 

@@ -1,7 +1,7 @@
 //! Type-erased handler registry for runtime dispatch.
 #![allow(clippy::redundant_pub_crate)]
 
-use std::{collections::HashMap, marker::PhantomData, sync::Arc};
+use std::{collections::HashMap, marker::PhantomData, sync::Arc, time::Duration};
 
 use crate::handler::{DomainEvent, EventHandler, HandlerContext, HandlerError};
 
@@ -62,13 +62,24 @@ where
     }
 }
 
-/// In-memory registry mapping handler IDs to type-erased handlers.
+/// A registered handler together with its per-handler option overrides.
+/// Stored as the value type of [`Registry::handlers`].
+pub(crate) struct RegisteredHandler {
+    /// The type-erased handler.
+    pub(crate) handler: Arc<dyn ErasedHandler>,
+    /// Per-handler `handler_timeout` override; `None` ⇒ use the global
+    /// [`crate::builder::OutboxConfig`] `handler_timeout`.
+    pub(crate) handler_timeout: Option<Duration>,
+}
+
+/// In-memory registry mapping handler IDs to [`RegisteredHandler`]s
+/// (type-erased handler + per-handler option overrides).
 ///
 /// Populated at `Worker` build time; immutable during dispatch.
 /// Held behind an `Arc<Registry>` by the worker.
 pub(crate) struct Registry {
-    /// Primary lookup: `handler_id` → erased handler.
-    pub(crate) handlers: HashMap<String, Arc<dyn ErasedHandler>>,
+    /// Primary lookup: `handler_id` → registered handler.
+    pub(crate) handlers: HashMap<String, RegisteredHandler>,
     /// Secondary index: `event_type` → list of registered `handler_id`s.
     pub(crate) by_type: HashMap<&'static str, Vec<String>>,
 }
@@ -84,7 +95,7 @@ impl Registry {
     }
 
     /// Look up a handler by its stable `handler_id`.
-    pub(crate) fn lookup(&self, handler_id: &str) -> Option<&Arc<dyn ErasedHandler>> {
+    pub(crate) fn lookup(&self, handler_id: &str) -> Option<&RegisteredHandler> {
         self.handlers.get(handler_id)
     }
 

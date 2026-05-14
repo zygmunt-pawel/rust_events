@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -51,7 +51,7 @@ async fn pgwq_last_error_contains_no_pg_detail() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("h", AlwaysRetryHandler)
+        .register_handler::<Ev, _>("h", AlwaysRetryHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();

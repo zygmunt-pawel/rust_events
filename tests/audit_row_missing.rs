@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -39,7 +39,7 @@ async fn m1_missing_row_aborts_with_audit_missing_tracing() {
                 .build()
                 .unwrap(),
         )
-        .register_handler::<Ev, _>("h", Trip)
+        .register_handler::<Ev, _>("h", Trip, HandlerOptions::new())
         .build()
         .unwrap();
 

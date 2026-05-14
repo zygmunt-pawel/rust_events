@@ -435,10 +435,13 @@ impl OutboxBuilder {
 
     /// Register a handler. Takes ownership of `handler` and wraps internally
     /// in `Arc<TypedHandler<E, H>>` — no need for callers to wrap themselves.
+    /// `options` carries per-handler overrides; pass `HandlerOptions::new()`
+    /// for a handler that should use the global `OutboxConfig` verbatim.
     pub fn register_handler<E, H>(
         self,
         handler_id: impl Into<String>,
         handler: H,
+        options: HandlerOptions,
     ) -> Self
     where E: DomainEvent, H: EventHandler<E>;
 
@@ -492,12 +495,22 @@ impl OutboxConfigBuilder {
 #[derive(Debug, Clone, Copy)]
 pub enum DecodeStrategy { Retry, Abort }
 
+/// Per-handler registration overrides, passed to `register_handler`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HandlerOptions { /* handler_timeout: Option<Duration> */ }
+impl HandlerOptions {
+    pub const fn new() -> Self;
+    pub const fn handler_timeout(self, d: Duration) -> Self;
+}
+
 pub use pg_work_queue::{BackoffPolicy, PanicPolicy};
 ```
 
 Defaults mirror `pg_work_queue`'s WorkerBuilder defaults: poll 500ms, concurrency 16, max_attempts 5, lease 300s, handler_timeout = 80% lease, exponential backoff base=1s factor=2 cap=5min jitter=0.2. Plus: `strict_handler_lookup=false`, `decode_error_strategy=Retry`, `allow_no_handlers=false`.
 
 **Builder semantics:** `OutboxBuilder::config()` called twice — last wins (mirror pg_work_queue `WorkerBuilder`). `register_handler` called twice with same `(E::EVENT_TYPE, handler_id)` — recorded; surfaces as `BuildError::DuplicateHandlerId` at `build()` time (fail-late). No silent override.
+
+**Per-handler `handler_timeout`:** `register_handler` takes a `HandlerOptions` argument. `HandlerOptions::handler_timeout` overrides the global `OutboxConfig::handler_timeout` for that one handler. The override is **match-or-tighten only** — validated at `build()` to be `> 2 × HANDLER_CLEANUP_BUDGET` and `<= OutboxConfig::handler_timeout`. The global value is a hard ceiling because pgwq's worker-wide outer cancellation (and lease math) is configured with it; rust_events resolves the effective per-attempt budget in `handle_envelope` from the registry-stored override, falling back to the global when unset.
 
 ### `Outbox`
 

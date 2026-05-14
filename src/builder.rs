@@ -3,7 +3,7 @@
 
 use crate::error::BuildError;
 use crate::handler::{DomainEvent, EventHandler};
-use crate::registry::{ErasedHandler, Registry, TypedHandler};
+use crate::registry::{ErasedHandler, RegisteredHandler, Registry, TypedHandler};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -26,6 +26,62 @@ pub enum DecodeStrategy {
     /// Use only when payload schema is strictly versioned and decode errors
     /// must surface immediately.
     Abort,
+}
+
+/// Per-handler registration options. Every field is optional; an unset field
+/// falls back to the corresponding global [`OutboxConfig`] value.
+///
+/// This is a plain options value-bag, not a validating builder like
+/// [`OutboxConfigBuilder`] — it has no `build()` and no cross-field rules
+/// (per-handler bounds are checked against the global config at
+/// [`OutboxBuilder::build`], which is the only place both values are known).
+/// It still follows the crate's `const fn` setter / `#[must_use]` convention.
+/// Currently the only knob is
+/// [`handler_timeout`](HandlerOptions::handler_timeout).
+///
+/// Not `Copy` on purpose: this type is an extension point, and a future
+/// non-`Copy` field should not be a breaking change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HandlerOptions {
+    /// Per-handler `handler_timeout` override; `None` ⇒ use the global value.
+    /// Private — only read inside this module (`register_handler`, `build`).
+    handler_timeout: Option<Duration>,
+}
+
+impl HandlerOptions {
+    /// Options with every field unset — behaves identically to the global config.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            handler_timeout: None,
+        }
+    }
+
+    /// Override the wall-clock budget for a single invocation of *this*
+    /// handler.
+    ///
+    /// Must be `> 2 × HANDLER_CLEANUP_BUDGET` (i.e. `> 400 ms`) and
+    /// `<= OutboxConfig::handler_timeout`: the global timeout is a hard
+    /// ceiling because it is the single value `pg_work_queue`'s worker-wide
+    /// outer cancellation (and lease math) uses, so a per-handler value may
+    /// only *match or tighten* the global budget. Validated at
+    /// [`OutboxBuilder::build`]; a violation is [`BuildError::ConfigInvalid`].
+    ///
+    /// Note the effective handler budget is `d - HANDLER_CLEANUP_BUDGET`
+    /// (≈ `d - 200 ms`): the crate reserves the tail of the window for its own
+    /// `mark_*_fenced` audit write. A `d` near the 400 ms floor leaves a very
+    /// small actual budget.
+    ///
+    /// Multi-replica: the override is resolved from the registry of whichever
+    /// replica claims the job. Keep `HandlerOptions` consistent across replicas
+    /// — if the same `handler_id` carries different overrides on different
+    /// replicas, delivery stays at-least-once-safe but the effective timeout
+    /// for a given attempt is whichever replica won the claim.
+    #[must_use]
+    pub const fn handler_timeout(mut self, d: Duration) -> Self {
+        self.handler_timeout = Some(d);
+        self
+    }
 }
 
 /// Configuration for the `Outbox` runtime. Build with [`OutboxConfig::builder()`].
@@ -168,15 +224,26 @@ impl OutboxConfigBuilder {
                 "handler_timeout must be < lease_timeout".into(),
             ));
         }
-        let min_handler_timeout = crate::runtime::HANDLER_CLEANUP_BUDGET * 2;
-        if self.cfg.handler_timeout <= min_handler_timeout {
-            return Err(BuildError::ConfigInvalid(format!(
-                "handler_timeout must be > {min_handler_timeout:?} (2× HANDLER_CLEANUP_BUDGET) \
-                 so mark_*_fenced has headroom before pgwq's outer cancellation"
-            )));
-        }
+        handler_timeout_floor_check(self.cfg.handler_timeout, "OutboxConfig")?;
         Ok(self.cfg)
     }
+}
+
+/// Shared lower-bound check for any `handler_timeout` (global or per-handler):
+/// it must exceed `2 × HANDLER_CLEANUP_BUDGET` so the crate's internal
+/// `tokio::time::timeout` never collapses onto its 100 ms floor and always
+/// reserves room for the `mark_*_fenced` audit write. `label` identifies the
+/// source (`"OutboxConfig"` or a specific handler) in the error message.
+fn handler_timeout_floor_check(d: Duration, label: &str) -> Result<(), BuildError> {
+    let min = crate::runtime::HANDLER_CLEANUP_BUDGET * 2;
+    if d <= min {
+        return Err(BuildError::ConfigInvalid(format!(
+            "{label}: handler_timeout {d:?} must be > {min:?} \
+             (2× HANDLER_CLEANUP_BUDGET) so mark_*_fenced has headroom before \
+             pgwq's outer cancellation"
+        )));
+    }
+    Ok(())
 }
 
 /// Builder for [`crate::outbox::Outbox`]. Collects pool, config, and handler
@@ -194,6 +261,7 @@ struct PendingHandler {
     event_type: &'static str,
     handler_id: String,
     handler: Arc<dyn ErasedHandler>,
+    handler_timeout: Option<Duration>,
 }
 
 impl OutboxBuilder {
@@ -217,8 +285,21 @@ impl OutboxBuilder {
 
     /// Register a handler. Takes ownership of `handler` and wraps it in an
     /// `Arc<TypedHandler<E, H>>` internally — callers must **not** pre-wrap.
+    ///
+    /// `options` carries per-handler overrides (see [`HandlerOptions`]); pass
+    /// `HandlerOptions::new()` for a handler that should use the global
+    /// [`OutboxConfig`] verbatim.
+    // `options` is taken by value (not `&HandlerOptions`) so the ergonomic
+    // call site reads `HandlerOptions::new().handler_timeout(..)`; the type is
+    // intentionally not `Copy`, so clippy's needless_pass_by_value fires here.
     #[must_use]
-    pub fn register_handler<E, H>(mut self, handler_id: impl Into<String>, handler: H) -> Self
+    #[allow(clippy::needless_pass_by_value)]
+    pub fn register_handler<E, H>(
+        mut self,
+        handler_id: impl Into<String>,
+        handler: H,
+        options: HandlerOptions,
+    ) -> Self
     where
         E: DomainEvent,
         H: EventHandler<E>,
@@ -232,6 +313,7 @@ impl OutboxBuilder {
             event_type: E::EVENT_TYPE,
             handler_id: handler_id.into(),
             handler: erased,
+            handler_timeout: options.handler_timeout,
         });
         self
     }
@@ -250,12 +332,14 @@ impl OutboxBuilder {
     /// # Errors
     ///
     /// Returns [`BuildError`] when any handler ID is empty, too long, or
-    /// duplicated within the registry.
+    /// duplicated within the registry, or [`BuildError::ConfigInvalid`] when a
+    /// per-handler [`HandlerOptions::handler_timeout`] is out of range
+    /// (`<= 2 × HANDLER_CLEANUP_BUDGET` or `> OutboxConfig::handler_timeout`).
     pub fn build(self) -> Result<crate::outbox::Outbox, BuildError> {
         let config = self.config.unwrap_or_default();
 
         // Validate handler entries; build Registry.
-        let mut handlers: HashMap<String, Arc<dyn ErasedHandler>> = HashMap::new();
+        let mut handlers: HashMap<String, RegisteredHandler> = HashMap::new();
         let mut by_type: HashMap<&'static str, Vec<String>> = HashMap::new();
 
         for entry in self.pending {
@@ -274,11 +358,33 @@ impl OutboxBuilder {
                     handler_id: entry.handler_id,
                 });
             }
+            if let Some(ht) = entry.handler_timeout {
+                handler_timeout_floor_check(ht, &format!("handler '{}'", entry.handler_id))?;
+                if ht > config.handler_timeout {
+                    return Err(BuildError::ConfigInvalid(format!(
+                        "handler '{}': a per-handler handler_timeout may only \
+                         match or tighten the global budget, never exceed it — \
+                         {ht:?} is larger than the global OutboxConfig \
+                         handler_timeout {:?} (which is the default 240s when \
+                         .config(...) was not called). The global value is the \
+                         hard ceiling: pg_work_queue's worker-wide outer \
+                         cancellation enforces it. Fix: lower this override, or \
+                         raise the global handler_timeout.",
+                        entry.handler_id, config.handler_timeout
+                    )));
+                }
+            }
             by_type
                 .entry(entry.event_type)
                 .or_default()
                 .push(entry.handler_id.clone());
-            handlers.insert(entry.handler_id, entry.handler);
+            handlers.insert(
+                entry.handler_id,
+                RegisteredHandler {
+                    handler: entry.handler,
+                    handler_timeout: entry.handler_timeout,
+                },
+            );
         }
 
         let registry = Arc::new(Registry { handlers, by_type });
@@ -289,5 +395,32 @@ impl OutboxBuilder {
             registry,
             self.allow_no_handlers,
         ))
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::HandlerOptions;
+    use std::time::Duration;
+
+    #[test]
+    fn handler_options_records_timeout_override() {
+        let o = HandlerOptions::new().handler_timeout(Duration::from_secs(180));
+        assert_eq!(o.handler_timeout, Some(Duration::from_secs(180)));
+    }
+
+    #[test]
+    fn handler_options_default_has_no_override() {
+        assert_eq!(HandlerOptions::default().handler_timeout, None);
+        assert_eq!(HandlerOptions::new().handler_timeout, None);
+    }
+
+    #[test]
+    fn handler_options_last_timeout_wins() {
+        let o = HandlerOptions::new()
+            .handler_timeout(Duration::from_secs(1))
+            .handler_timeout(Duration::from_secs(2));
+        assert_eq!(o.handler_timeout, Some(Duration::from_secs(2)));
     }
 }

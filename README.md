@@ -130,7 +130,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     // Build and start the outbox worker.
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<OrderCreated, _>("audit", Auditor)
+        .register_handler::<OrderCreated, _>("audit", Auditor, HandlerOptions::new())
         .build()?;
 
     let handle = outbox.start().await?;
@@ -314,7 +314,7 @@ Detailed rustdoc at [docs.rs/rust_events](https://docs.rs/rust_events). Brief mo
 
 ```rust
 OutboxBuilder::new(pool)
-    .register_handler::<MyEvent, _>("handler_id", MyHandler)
+    .register_handler::<MyEvent, _>("handler_id", MyHandler, HandlerOptions::new())
     .allow_no_handlers(false)   // default: false → error if no handler registered
     .config(OutboxConfig::builder()
         .poll_interval(Duration::from_millis(500))  // default
@@ -333,6 +333,24 @@ OutboxBuilder::new(pool)
 ```
 
 `register_handler` called twice with the same `(EVENT_TYPE, handler_id)` pair surfaces as `BuildError::DuplicateHandlerId` at `build()` time. No silent override.
+
+### Per-handler timeout
+
+`OutboxConfig::handler_timeout` is the global wall-clock budget for every handler invocation. A handler may tighten that budget for itself via `HandlerOptions`:
+
+```rust
+.register_handler::<LlmClassify, _>(
+    "bc2_llm",
+    LlmClassifier,
+    HandlerOptions::new().handler_timeout(Duration::from_secs(180)),
+)
+```
+
+The per-handler value may only **match or tighten** the global budget: it must be `> 400 ms` and `<= OutboxConfig::handler_timeout`. The global value is a hard ceiling because `pg_work_queue`'s worker-wide outer cancellation (and the lease math) is configured with it — `rust_events` cannot extend a handler's budget past what pgwq itself enforces. Set the global `handler_timeout` to your *slowest* handler's needs and use per-handler overrides to hold faster handlers to a tighter bound. A handler registered with `HandlerOptions::new()` (no override) uses the global value unchanged. A violation is `BuildError::ConfigInvalid` at `build()` time.
+
+**Multi-replica note.** The per-handler timeout is resolved from the registry of whichever replica claims the job. If two replicas register the same `handler_id` with *different* per-handler timeouts (a deployment skew / misconfiguration), delivery stays at-least-once-safe but the effective timeout for a given attempt is non-deterministic — whichever replica wins the `FOR UPDATE SKIP LOCKED` claim decides. Keep `HandlerOptions` consistent across replicas, the same way you keep `OutboxConfig` consistent.
+
+**Migration from 0.2.x.** `register_handler` now takes a third argument. Pass `HandlerOptions::new()` to preserve the previous behavior.
 
 ### `Outbox`
 

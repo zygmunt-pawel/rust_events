@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::{
@@ -47,7 +47,11 @@ async fn handler_called_exactly_once_audit_marked_sent() {
 
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<OrderShipped, _>("audit", Counter(counter.clone()))
+        .register_handler::<OrderShipped, _>(
+            "audit",
+            Counter(counter.clone()),
+            HandlerOptions::new(),
+        )
         .build()
         .unwrap();
 

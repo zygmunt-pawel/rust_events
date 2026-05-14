@@ -5,7 +5,7 @@ mod common;
 
 use rust_events::{
     DispatchContext, DispatchError, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder,
+    HandlerOptions, OutboxBuilder,
 };
 use serde::{Deserialize, Serialize};
 
@@ -31,7 +31,7 @@ async fn headers_over_16kib_rejected_typed() {
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ev, _>("h", H)
+        .register_handler::<Ev, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
 
@@ -63,7 +63,7 @@ async fn headers_under_cap_accepted() {
     pg_work_queue::migrator().run(&pool).await.unwrap();
     rust_events::migrator().run(&pool).await.unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
-        .register_handler::<Ev, _>("h", H)
+        .register_handler::<Ev, _>("h", H, HandlerOptions::new())
         .build()
         .unwrap();
 

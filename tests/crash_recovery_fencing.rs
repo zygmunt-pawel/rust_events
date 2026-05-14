@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder,
-    OutboxConfig,
+    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
+    OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -132,6 +132,7 @@ async fn b1_gated_fencing_race(
                 proceed: proceed.clone(),
                 result: handler_result,
             },
+            HandlerOptions::new(),
         )
         .build()
         .unwrap();

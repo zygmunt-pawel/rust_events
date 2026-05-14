@@ -335,11 +335,9 @@ impl OutboxRuntime {
         // ③b Deferred strict-mode registry check. The row is now 'running'
         //     (CTE updated it in step ②), so mark_dead_fenced's WHERE
         //     `status='running' AND lease_token=$token` can match.
-        let handler = if let Some(h) = self.registry.lookup(&env.handler_id) {
-            h.clone()
-        } else {
+        let Some(registered) = self.registry.lookup(&env.handler_id) else {
             // strict_handler_lookup must be true here — loose mode returned
-            // early in step ①.
+            // early in step ①. (Body unchanged from the previous `else`.)
             tracing::error!(
                 target: "rust_events.worker.handler_not_registered",
                 handler_id = %env.handler_id,
@@ -356,6 +354,17 @@ impl OutboxRuntime {
                 "handler not registered (strict mode)",
             ));
         };
+        // Copy out owned values immediately. `registered` borrows
+        // `self.registry`; do NOT reference it past these two lines.
+        let handler = registered.handler.clone();
+        // Per-handler override tightens (or matches) the global budget; `None`
+        // ⇒ global. Validated `<= config.handler_timeout` at build(), so our
+        // internal timeout always fires before pgwq's single worker-wide outer
+        // timeout — which stays at the global value. Do NOT try to make pgwq's
+        // outer timer per-handler: pgwq has one `handler_timeout` per Worker.
+        let effective_timeout = registered
+            .handler_timeout
+            .unwrap_or(self.config.handler_timeout);
 
         // ④ Build HandlerContext.
         let hctx = HandlerContext {
@@ -377,9 +386,11 @@ impl OutboxRuntime {
         // is skipped and the audit row stays at `status='running'` forever.
         // Our timeout fires `HANDLER_CLEANUP_BUDGET` before pgwq's so we
         // have room to commit the mark UPDATE before pgwq cancels us.
-        let our_timeout = self
-            .config
-            .handler_timeout
+        // The `.max(100ms)` is unreachable for any build()-validated config
+        // (the `> 2 × HANDLER_CLEANUP_BUDGET` floor guarantees the result is
+        // `> HANDLER_CLEANUP_BUDGET`); it is pure belt-and-braces should that
+        // floor ever be relaxed.
+        let our_timeout = effective_timeout
             .saturating_sub(HANDLER_CLEANUP_BUDGET)
             .max(Duration::from_millis(100));
         let user_fut = AssertUnwindSafe(handler.handle_erased(&row.payload, &hctx)).catch_unwind();
@@ -424,6 +435,7 @@ impl OutboxRuntime {
                     handler_id = %env.handler_id,
                     attempt = ctx.attempt,
                     max_attempts = ctx.max_attempts,
+                    effective_timeout = ?effective_timeout,
                     "handler exceeded handler_timeout; routing through mark_*_fenced"
                 );
                 HandlerOutcome::Handler(HandlerError::retry("handler_timeout"))

@@ -5,12 +5,12 @@ mod common;
 
 use rust_events::{
     BackoffPolicy, DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError,
-    OutboxBuilder, OutboxConfig, PanicPolicy,
+    HandlerOptions, OutboxBuilder, OutboxConfig, PanicPolicy,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 #[derive(Serialize, Deserialize)]
 struct Ev;
@@ -59,6 +59,7 @@ async fn handler_timeout_terminalizes_to_dead() {
             SleepyHandler {
                 delay: Duration::from_secs(10),
             },
+            HandlerOptions::new(),
         )
         .build()
         .unwrap();
@@ -141,6 +142,7 @@ async fn panic_policy_retry_recovers_on_next_attempt() {
             PanicOnceHandler {
                 calls: calls.clone(),
             },
+            HandlerOptions::new(),
         )
         .build()
         .unwrap();
@@ -209,7 +211,7 @@ async fn panic_policy_dead_terminalizes_immediately() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", AlwaysPanicHandler)
+        .register_handler::<Ev, _>("p", AlwaysPanicHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -285,7 +287,7 @@ async fn panic_with_nul_and_ansi_terminalizes_safely() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", NulPanicHandler)
+        .register_handler::<Ev, _>("p", NulPanicHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -373,7 +375,7 @@ async fn handler_retry_with_nul_reason_terminalizes_safely() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("r", NulRetryHandler)
+        .register_handler::<Ev, _>("r", NulRetryHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -432,7 +434,7 @@ async fn panic_policy_retry_exhausted_terminalizes_to_dead() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        .register_handler::<Ev, _>("p", AlwaysPanicHandler)
+        .register_handler::<Ev, _>("p", AlwaysPanicHandler, HandlerOptions::new())
         .build()
         .unwrap();
     let handle = outbox.start().await.unwrap();
@@ -465,6 +467,236 @@ async fn panic_policy_retry_exhausted_terminalizes_to_dead() {
             .await
             .unwrap();
     assert_eq!(running, 0);
+
+    let _ = handle.shutdown(Duration::from_secs(3)).await;
+}
+
+// ── per-handler handler_timeout override ─────────────────────────────────────
+
+/// (a) Enforcement: a per-handler `handler_timeout` override is honored by
+/// `handle_envelope`. Global timeout is 20 s; the handler gets a 1 s override
+/// and sleeps 10 s. It terminalizes to `dead` in well under 7 s — proof the
+/// 1 s override, not the 20 s global, drove cancellation: a single
+/// global-driven attempt alone would take ~19.8 s. The elapsed-time assertion
+/// IS the discriminator.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_handler_timeout_override_is_enforced() {
+    let (_c, pool) = common::pg_container().await;
+    pg_work_queue::migrator().run(&pool).await.unwrap();
+    rust_events::migrator().run(&pool).await.unwrap();
+
+    let cfg = OutboxConfig::builder()
+        .poll_interval(Duration::from_millis(100))
+        .concurrency(1)
+        .max_attempts(2)
+        .lease_timeout(Duration::from_secs(30))
+        .handler_timeout(Duration::from_secs(20)) // global ceiling
+        .retry_backoff(BackoffPolicy::fixed(Duration::from_millis(100)))
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool.clone())
+        .config(cfg)
+        .register_handler::<Ev, _>(
+            "sleepy",
+            SleepyHandler {
+                delay: Duration::from_secs(10),
+            },
+            HandlerOptions::new().handler_timeout(Duration::from_secs(1)),
+        )
+        .build()
+        .unwrap();
+    let handle = outbox.start().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    // Clock starts after commit — measures only the worker's claim→terminal
+    // path, not the dispatch round-trip.
+    let started = Instant::now();
+
+    // Override path ≈ 2 × ~800 ms timeout + 100 ms backoff + claim latency
+    // ≈ under 4 s. Poll up to 12 s so a slow container never false-FAILs the
+    // status check; the `elapsed < 7s` assertion is what proves the override
+    // (not the ~19.8 s global path) drove it.
+    let mut final_status = String::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        final_status = sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM outbox.handler_deliveries LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if matches!(final_status.as_str(), "dead" | "sent" | "skipped") {
+            break;
+        }
+    }
+    let elapsed = started.elapsed();
+    assert_eq!(
+        final_status, "dead",
+        "override-bounded handler must terminalize to dead"
+    );
+    assert!(
+        elapsed < Duration::from_secs(7),
+        "1s per-handler override must terminalize well before the ~19.8s a \
+         20s-global-driven path needs; elapsed {elapsed:?}"
+    );
+
+    let running: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM outbox.handler_deliveries WHERE status='running'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert_eq!(running, 0, "no audit row should remain in 'running'");
+
+    let _ = handle.shutdown(Duration::from_secs(3)).await;
+}
+
+/// (b) Non-interference: a handler that finishes within its tight per-handler
+/// budget reaches `sent`. 1 s override ⇒ ~800 ms effective budget; the handler
+/// sleeps 200 ms. Guards against a regression that collapsed `effective_timeout`
+/// toward the 100 ms floor (or otherwise mis-shrank it): such a handler would
+/// then be wrongly cancelled instead of reaching `sent`.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_handler_timeout_override_allows_fast_handler() {
+    let (_c, pool) = common::pg_container().await;
+    pg_work_queue::migrator().run(&pool).await.unwrap();
+    rust_events::migrator().run(&pool).await.unwrap();
+
+    let cfg = OutboxConfig::builder()
+        .poll_interval(Duration::from_millis(100))
+        .concurrency(1)
+        .max_attempts(2)
+        .lease_timeout(Duration::from_secs(30))
+        .handler_timeout(Duration::from_secs(20))
+        .retry_backoff(BackoffPolicy::fixed(Duration::from_millis(100)))
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool.clone())
+        .config(cfg)
+        .register_handler::<Ev, _>(
+            "fast",
+            SleepyHandler {
+                delay: Duration::from_millis(200),
+            },
+            HandlerOptions::new().handler_timeout(Duration::from_secs(1)),
+        )
+        .build()
+        .unwrap();
+    let handle = outbox.start().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    let mut final_status = String::new();
+    for _ in 0..30 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        final_status = sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM outbox.handler_deliveries LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        if matches!(final_status.as_str(), "sent" | "dead" | "skipped") {
+            break;
+        }
+    }
+    assert_eq!(
+        final_status, "sent",
+        "handler finishing within its per-handler budget must reach 'sent'"
+    );
+
+    let _ = handle.shutdown(Duration::from_secs(3)).await;
+}
+
+/// (c) Per-`handler_id` resolution: two handlers on the SAME event type, BOTH
+/// with distinct non-`None` overrides, both sleeping the SAME 3 s. The 20 s
+/// global would let *both* succeed — so the divergent outcome (`tight` dies,
+/// `roomy` sends) is explainable ONLY by the timeout being resolved per
+/// `handler_id`. A runtime that resolved by the wrong key (`event_type`,
+/// registration order, …) could not produce this split.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn per_handler_timeout_resolved_per_handler_id() {
+    let (_c, pool) = common::pg_container().await;
+    pg_work_queue::migrator().run(&pool).await.unwrap();
+    rust_events::migrator().run(&pool).await.unwrap();
+
+    let cfg = OutboxConfig::builder()
+        .poll_interval(Duration::from_millis(100))
+        .concurrency(1)
+        .max_attempts(2)
+        .lease_timeout(Duration::from_secs(30))
+        .handler_timeout(Duration::from_secs(20))
+        .retry_backoff(BackoffPolicy::fixed(Duration::from_millis(100)))
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool.clone())
+        .config(cfg)
+        // "tight": 1s override (~800ms budget), sleeps 3s → must die.
+        .register_handler::<Ev, _>(
+            "tight",
+            SleepyHandler {
+                delay: Duration::from_secs(3),
+            },
+            HandlerOptions::new().handler_timeout(Duration::from_secs(1)),
+        )
+        // "roomy": 10s override (~9.8s budget), sleeps the SAME 3s → must send.
+        .register_handler::<Ev, _>(
+            "roomy",
+            SleepyHandler {
+                delay: Duration::from_secs(3),
+            },
+            HandlerOptions::new().handler_timeout(Duration::from_secs(10)),
+        )
+        .build()
+        .unwrap();
+    let handle = outbox.start().await.unwrap();
+
+    let mut tx = pool.begin().await.unwrap();
+    outbox
+        .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+
+    // Poll until both deliveries are terminal (up to 12s).
+    let mut tight_status = String::new();
+    let mut roomy_status = String::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        tight_status = sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM outbox.handler_deliveries WHERE handler_id='tight'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        roomy_status = sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM outbox.handler_deliveries WHERE handler_id='roomy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let tight_done = matches!(tight_status.as_str(), "dead" | "sent" | "skipped");
+        let roomy_done = matches!(roomy_status.as_str(), "dead" | "sent" | "skipped");
+        if tight_done && roomy_done {
+            break;
+        }
+    }
+    assert_eq!(
+        tight_status, "dead",
+        "handler with 1s override (sleeping 3s) must die; got {tight_status}"
+    );
+    assert_eq!(
+        roomy_status, "sent",
+        "handler with 10s override (sleeping 3s) must send; got {roomy_status}"
+    );
 
     let _ = handle.shutdown(Duration::from_secs(3)).await;
 }

@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DomainEvent, EventHandler, HandlerContext, HandlerError, OutboxBuilder, OutboxConfig,
-    StartError,
+    DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions, OutboxBuilder,
+    OutboxConfig, StartError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +32,7 @@ async fn second_start_returns_already_started() {
     let cfg = OutboxConfig::builder().concurrency(1).build().unwrap();
     let outbox = OutboxBuilder::new(pool)
         .config(cfg)
-        .register_handler::<Ping, _>("audit", Noop)
+        .register_handler::<Ping, _>("audit", Noop, HandlerOptions::new())
         .build()
         .unwrap();
     let h = outbox.start().await.unwrap();
