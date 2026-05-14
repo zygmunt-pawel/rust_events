@@ -84,9 +84,11 @@ pub async fn purge_dispatch_keys(pool: &PgPool, older_than: Duration) -> Result<
 }
 
 /// Safe purge: only deletes events whose ALL deliveries are terminal
-/// (sent/dead/skipped). Recommended ordering: call
-/// `purge_terminal_deliveries` + `purge_dispatch_keys` BEFORE this so the
-/// NOT EXISTS predicate can find candidates.
+/// (sent/dead/skipped).
+///
+/// Recommended ordering: call `purge_terminal_deliveries` +
+/// `purge_dispatch_keys` BEFORE this so the NOT EXISTS predicate can find
+/// candidates.
 ///
 /// # Errors
 ///
