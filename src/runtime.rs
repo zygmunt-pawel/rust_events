@@ -386,6 +386,10 @@ impl OutboxRuntime {
         // is skipped and the audit row stays at `status='running'` forever.
         // Our timeout fires `HANDLER_CLEANUP_BUDGET` before pgwq's so we
         // have room to commit the mark UPDATE before pgwq cancels us.
+        // The `.max(100ms)` is unreachable for any build()-validated config
+        // (the `> 2 × HANDLER_CLEANUP_BUDGET` floor guarantees the result is
+        // `> HANDLER_CLEANUP_BUDGET`); it is pure belt-and-braces should that
+        // floor ever be relaxed.
         let our_timeout = effective_timeout
             .saturating_sub(HANDLER_CLEANUP_BUDGET)
             .max(Duration::from_millis(100));

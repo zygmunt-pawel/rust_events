@@ -133,7 +133,7 @@ async fn per_handler_timeout_exceeding_global_rejected() {
         .build()
         .unwrap_err();
     assert!(
-        matches!(err, BuildError::ConfigInvalid(ref m) if m.contains("exceeds the global")),
+        matches!(err, BuildError::ConfigInvalid(ref m) if m.contains("may only match or tighten")),
         "expected ConfigInvalid about exceeding global, got {err:?}"
     );
 }
@@ -202,5 +202,24 @@ async fn per_handler_timeout_equal_to_global_accepted() {
     assert!(
         outbox.is_ok(),
         "per-handler timeout equal to global must build: {outbox:?}"
+    );
+}
+
+/// Boundary companion to `per_handler_timeout_below_cleanup_budget_rejected`:
+/// just above the `2 × HANDLER_CLEANUP_BUDGET` floor (401 ms) must be accepted —
+/// confirms the per-handler floor is strict-greater-than, not >=.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_handler_timeout_just_above_cleanup_budget_accepted() {
+    let (_c, pool) = common::pg_container().await;
+    let outbox = OutboxBuilder::new(pool)
+        .register_handler::<E1, _>(
+            "edge",
+            H,
+            HandlerOptions::new().handler_timeout(Duration::from_millis(401)),
+        )
+        .build();
+    assert!(
+        outbox.is_ok(),
+        "401ms per-handler timeout must pass validation: {outbox:?}"
     );
 }

@@ -38,7 +38,10 @@ pub enum DecodeStrategy {
 /// It still follows the crate's `const fn` setter / `#[must_use]` convention.
 /// Currently the only knob is
 /// [`handler_timeout`](HandlerOptions::handler_timeout).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+///
+/// Not `Copy` on purpose: this type is an extension point, and a future
+/// non-`Copy` field should not be a breaking change.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HandlerOptions {
     /// Per-handler `handler_timeout` override; `None` ⇒ use the global value.
     /// Private — only read inside this module (`register_handler`, `build`).
@@ -68,6 +71,12 @@ impl HandlerOptions {
     /// (≈ `d - 200 ms`): the crate reserves the tail of the window for its own
     /// `mark_*_fenced` audit write. A `d` near the 400 ms floor leaves a very
     /// small actual budget.
+    ///
+    /// Multi-replica: the override is resolved from the registry of whichever
+    /// replica claims the job. Keep `HandlerOptions` consistent across replicas
+    /// — if the same `handler_id` carries different overrides on different
+    /// replicas, delivery stays at-least-once-safe but the effective timeout
+    /// for a given attempt is whichever replica won the claim.
     #[must_use]
     pub const fn handler_timeout(mut self, d: Duration) -> Self {
         self.handler_timeout = Some(d);
@@ -230,7 +239,8 @@ fn handler_timeout_floor_check(d: Duration, label: &str) -> Result<(), BuildErro
     if d <= min {
         return Err(BuildError::ConfigInvalid(format!(
             "{label}: handler_timeout {d:?} must be > {min:?} \
-             (2× HANDLER_CLEANUP_BUDGET)"
+             (2× HANDLER_CLEANUP_BUDGET) so mark_*_fenced has headroom before \
+             pgwq's outer cancellation"
         )));
     }
     Ok(())
@@ -279,7 +289,11 @@ impl OutboxBuilder {
     /// `options` carries per-handler overrides (see [`HandlerOptions`]); pass
     /// `HandlerOptions::new()` for a handler that should use the global
     /// [`OutboxConfig`] verbatim.
+    // `options` is taken by value (not `&HandlerOptions`) so the ergonomic
+    // call site reads `HandlerOptions::new().handler_timeout(..)`; the type is
+    // intentionally not `Copy`, so clippy's needless_pass_by_value fires here.
     #[must_use]
+    #[allow(clippy::needless_pass_by_value)]
     pub fn register_handler<E, H>(
         mut self,
         handler_id: impl Into<String>,
@@ -318,7 +332,9 @@ impl OutboxBuilder {
     /// # Errors
     ///
     /// Returns [`BuildError`] when any handler ID is empty, too long, or
-    /// duplicated within the registry.
+    /// duplicated within the registry, or [`BuildError::ConfigInvalid`] when a
+    /// per-handler [`HandlerOptions::handler_timeout`] is out of range
+    /// (`<= 2 × HANDLER_CLEANUP_BUDGET` or `> OutboxConfig::handler_timeout`).
     pub fn build(self) -> Result<crate::outbox::Outbox, BuildError> {
         let config = self.config.unwrap_or_default();
 
@@ -346,12 +362,14 @@ impl OutboxBuilder {
                 handler_timeout_floor_check(ht, &format!("handler '{}'", entry.handler_id))?;
                 if ht > config.handler_timeout {
                     return Err(BuildError::ConfigInvalid(format!(
-                        "handler '{}': handler_timeout {ht:?} exceeds the global \
-                         OutboxConfig handler_timeout {:?} — a per-handler timeout \
-                         may only match or tighten the global budget, never exceed \
-                         it (the global value, default 240s when .config(...) is \
-                         not set, is what pg_work_queue's worker-wide outer \
-                         cancellation enforces)",
+                        "handler '{}': a per-handler handler_timeout may only \
+                         match or tighten the global budget, never exceed it — \
+                         {ht:?} is larger than the global OutboxConfig \
+                         handler_timeout {:?} (which is the default 240s when \
+                         .config(...) was not called). The global value is the \
+                         hard ceiling: pg_work_queue's worker-wide outer \
+                         cancellation enforces it. Fix: lower this override, or \
+                         raise the global handler_timeout.",
                         entry.handler_id, config.handler_timeout
                     )));
                 }

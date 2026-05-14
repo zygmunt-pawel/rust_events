@@ -72,7 +72,8 @@ pub(crate) struct RegisteredHandler {
     pub(crate) handler_timeout: Option<Duration>,
 }
 
-/// In-memory registry mapping handler IDs to type-erased handlers.
+/// In-memory registry mapping handler IDs to [`RegisteredHandler`]s
+/// (type-erased handler + per-handler option overrides).
 ///
 /// Populated at `Worker` build time; immutable during dispatch.
 /// Held behind an `Arc<Registry>` by the worker.

@@ -507,13 +507,15 @@ async fn per_handler_timeout_override_is_enforced() {
         .unwrap();
     let handle = outbox.start().await.unwrap();
 
-    let started = Instant::now();
     let mut tx = pool.begin().await.unwrap();
     outbox
         .dispatch(&mut tx, &DispatchContext::new("t"), &Ev)
         .await
         .unwrap();
     tx.commit().await.unwrap();
+    // Clock starts after commit — measures only the worker's claim→terminal
+    // path, not the dispatch round-trip.
+    let started = Instant::now();
 
     // Override path ≈ 2 × ~800 ms timeout + 100 ms backoff + claim latency
     // ≈ under 4 s. Poll up to 12 s so a slow container never false-FAILs the
@@ -555,8 +557,9 @@ async fn per_handler_timeout_override_is_enforced() {
 
 /// (b) Non-interference: a handler that finishes within its tight per-handler
 /// budget reaches `sent`. 1 s override ⇒ ~800 ms effective budget; the handler
-/// sleeps 200 ms. Proves `effective_timeout` is wired into the success path
-/// and does not wrongly cancel a handler that fits.
+/// sleeps 200 ms. Guards against a regression that collapsed `effective_timeout`
+/// toward the 100 ms floor (or otherwise mis-shrank it): such a handler would
+/// then be wrongly cancelled instead of reaching `sent`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn per_handler_timeout_override_allows_fast_handler() {
     let (_c, pool) = common::pg_container().await;
@@ -613,10 +616,12 @@ async fn per_handler_timeout_override_allows_fast_handler() {
     let _ = handle.shutdown(Duration::from_secs(3)).await;
 }
 
-/// (c) Per-`handler_id` resolution: two handlers on the SAME event type, one
-/// with a tight override (times out → dead), one with no override (uses the
-/// generous global → sent). Proves the timeout is resolved per handler, not
-/// once globally.
+/// (c) Per-`handler_id` resolution: two handlers on the SAME event type, BOTH
+/// with distinct non-`None` overrides, both sleeping the SAME 3 s. The 20 s
+/// global would let *both* succeed — so the divergent outcome (`tight` dies,
+/// `roomy` sends) is explainable ONLY by the timeout being resolved per
+/// `handler_id`. A runtime that resolved by the wrong key (`event_type`,
+/// registration order, …) could not produce this split.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn per_handler_timeout_resolved_per_handler_id() {
     let (_c, pool) = common::pg_container().await;
@@ -634,21 +639,21 @@ async fn per_handler_timeout_resolved_per_handler_id() {
         .unwrap();
     let outbox = OutboxBuilder::new(pool.clone())
         .config(cfg)
-        // "tight": 1s override, sleeps 10s → must die.
+        // "tight": 1s override (~800ms budget), sleeps 3s → must die.
         .register_handler::<Ev, _>(
             "tight",
             SleepyHandler {
-                delay: Duration::from_secs(10),
+                delay: Duration::from_secs(3),
             },
             HandlerOptions::new().handler_timeout(Duration::from_secs(1)),
         )
-        // "loose": no override, uses the 20s global, sleeps 200ms → must send.
+        // "roomy": 10s override (~9.8s budget), sleeps the SAME 3s → must send.
         .register_handler::<Ev, _>(
-            "loose",
+            "roomy",
             SleepyHandler {
-                delay: Duration::from_millis(200),
+                delay: Duration::from_secs(3),
             },
-            HandlerOptions::new(),
+            HandlerOptions::new().handler_timeout(Duration::from_secs(10)),
         )
         .build()
         .unwrap();
@@ -663,7 +668,7 @@ async fn per_handler_timeout_resolved_per_handler_id() {
 
     // Poll until both deliveries are terminal (up to 12s).
     let mut tight_status = String::new();
-    let mut loose_status = String::new();
+    let mut roomy_status = String::new();
     for _ in 0..60 {
         tokio::time::sleep(Duration::from_millis(200)).await;
         tight_status = sqlx::query_scalar::<_, String>(
@@ -672,25 +677,25 @@ async fn per_handler_timeout_resolved_per_handler_id() {
         .fetch_one(&pool)
         .await
         .unwrap();
-        loose_status = sqlx::query_scalar::<_, String>(
-            "SELECT status::text FROM outbox.handler_deliveries WHERE handler_id='loose'",
+        roomy_status = sqlx::query_scalar::<_, String>(
+            "SELECT status::text FROM outbox.handler_deliveries WHERE handler_id='roomy'",
         )
         .fetch_one(&pool)
         .await
         .unwrap();
         let tight_done = matches!(tight_status.as_str(), "dead" | "sent" | "skipped");
-        let loose_done = matches!(loose_status.as_str(), "dead" | "sent" | "skipped");
-        if tight_done && loose_done {
+        let roomy_done = matches!(roomy_status.as_str(), "dead" | "sent" | "skipped");
+        if tight_done && roomy_done {
             break;
         }
     }
     assert_eq!(
         tight_status, "dead",
-        "handler with 1s override must die; got {tight_status}"
+        "handler with 1s override (sleeping 3s) must die; got {tight_status}"
     );
     assert_eq!(
-        loose_status, "sent",
-        "handler with no override (20s global) must send; got {loose_status}"
+        roomy_status, "sent",
+        "handler with 10s override (sleeping 3s) must send; got {roomy_status}"
     );
 
     let _ = handle.shutdown(Duration::from_secs(3)).await;
