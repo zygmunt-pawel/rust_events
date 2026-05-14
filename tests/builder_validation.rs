@@ -8,6 +8,7 @@ use rust_events::{
     OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
 
 #[derive(Serialize, Deserialize)]
 struct E1 {
@@ -108,4 +109,98 @@ async fn default_config_builds() {
         .register_handler::<E1, _>("audit", H, HandlerOptions::new())
         .build()
         .unwrap();
+}
+
+/// A per-handler `handler_timeout` larger than the global `OutboxConfig`
+/// `handler_timeout` is rejected at `build()` — the global is the hard
+/// ceiling (pgwq's worker-wide outer cancellation uses it), so a per-handler
+/// value may only match or tighten it, never exceed it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_handler_timeout_exceeding_global_rejected() {
+    let (_c, pool) = common::pg_container().await;
+    let cfg = OutboxConfig::builder()
+        .handler_timeout(Duration::from_secs(10))
+        .lease_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let err = OutboxBuilder::new(pool)
+        .config(cfg)
+        .register_handler::<E1, _>(
+            "slow",
+            H,
+            HandlerOptions::new().handler_timeout(Duration::from_secs(20)),
+        )
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(err, BuildError::ConfigInvalid(ref m) if m.contains("exceeds the global")),
+        "expected ConfigInvalid about exceeding global, got {err:?}"
+    );
+}
+
+/// A per-handler `handler_timeout` at or below `2 × HANDLER_CLEANUP_BUDGET`
+/// (400 ms) is rejected — same floor as the global timeout.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_handler_timeout_below_cleanup_budget_rejected() {
+    let (_c, pool) = common::pg_container().await;
+    let err = OutboxBuilder::new(pool)
+        .register_handler::<E1, _>(
+            "tiny",
+            H,
+            HandlerOptions::new().handler_timeout(Duration::from_millis(400)),
+        )
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(err, BuildError::ConfigInvalid(ref m) if m.contains("HANDLER_CLEANUP_BUDGET")),
+        "expected ConfigInvalid about cleanup budget, got {err:?}"
+    );
+}
+
+/// A per-handler `handler_timeout` strictly inside `(400 ms, global)` builds fine.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_handler_timeout_within_global_accepted() {
+    let (_c, pool) = common::pg_container().await;
+    let cfg = OutboxConfig::builder()
+        .handler_timeout(Duration::from_secs(10))
+        .lease_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool)
+        .config(cfg)
+        .register_handler::<E1, _>(
+            "fast",
+            H,
+            HandlerOptions::new().handler_timeout(Duration::from_secs(2)),
+        )
+        .build();
+    assert!(
+        outbox.is_ok(),
+        "valid per-handler timeout must build: {outbox:?}"
+    );
+}
+
+/// Boundary: a per-handler `handler_timeout` exactly EQUAL to the global is
+/// accepted — `<=` is the correct ceiling (it is byte-identical to the
+/// no-override path).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn per_handler_timeout_equal_to_global_accepted() {
+    let (_c, pool) = common::pg_container().await;
+    let cfg = OutboxConfig::builder()
+        .handler_timeout(Duration::from_secs(10))
+        .lease_timeout(Duration::from_secs(30))
+        .build()
+        .unwrap();
+    let outbox = OutboxBuilder::new(pool)
+        .config(cfg)
+        .register_handler::<E1, _>(
+            "exact",
+            H,
+            HandlerOptions::new().handler_timeout(Duration::from_secs(10)),
+        )
+        .build();
+    assert!(
+        outbox.is_ok(),
+        "per-handler timeout equal to global must build: {outbox:?}"
+    );
 }

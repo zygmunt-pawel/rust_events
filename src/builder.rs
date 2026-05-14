@@ -215,15 +215,25 @@ impl OutboxConfigBuilder {
                 "handler_timeout must be < lease_timeout".into(),
             ));
         }
-        let min_handler_timeout = crate::runtime::HANDLER_CLEANUP_BUDGET * 2;
-        if self.cfg.handler_timeout <= min_handler_timeout {
-            return Err(BuildError::ConfigInvalid(format!(
-                "handler_timeout must be > {min_handler_timeout:?} (2× HANDLER_CLEANUP_BUDGET) \
-                 so mark_*_fenced has headroom before pgwq's outer cancellation"
-            )));
-        }
+        handler_timeout_floor_check(self.cfg.handler_timeout, "OutboxConfig")?;
         Ok(self.cfg)
     }
+}
+
+/// Shared lower-bound check for any `handler_timeout` (global or per-handler):
+/// it must exceed `2 × HANDLER_CLEANUP_BUDGET` so the crate's internal
+/// `tokio::time::timeout` never collapses onto its 100 ms floor and always
+/// reserves room for the `mark_*_fenced` audit write. `label` identifies the
+/// source (`"OutboxConfig"` or a specific handler) in the error message.
+fn handler_timeout_floor_check(d: Duration, label: &str) -> Result<(), BuildError> {
+    let min = crate::runtime::HANDLER_CLEANUP_BUDGET * 2;
+    if d <= min {
+        return Err(BuildError::ConfigInvalid(format!(
+            "{label}: handler_timeout {d:?} must be > {min:?} \
+             (2× HANDLER_CLEANUP_BUDGET)"
+        )));
+    }
+    Ok(())
 }
 
 /// Builder for [`crate::outbox::Outbox`]. Collects pool, config, and handler
@@ -331,6 +341,20 @@ impl OutboxBuilder {
                     event_type: entry.event_type,
                     handler_id: entry.handler_id,
                 });
+            }
+            if let Some(ht) = entry.handler_timeout {
+                handler_timeout_floor_check(ht, &format!("handler '{}'", entry.handler_id))?;
+                if ht > config.handler_timeout {
+                    return Err(BuildError::ConfigInvalid(format!(
+                        "handler '{}': handler_timeout {ht:?} exceeds the global \
+                         OutboxConfig handler_timeout {:?} — a per-handler timeout \
+                         may only match or tighten the global budget, never exceed \
+                         it (the global value, default 240s when .config(...) is \
+                         not set, is what pg_work_queue's worker-wide outer \
+                         cancellation enforces)",
+                        entry.handler_id, config.handler_timeout
+                    )));
+                }
             }
             by_type
                 .entry(entry.event_type)
