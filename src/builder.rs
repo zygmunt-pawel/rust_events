@@ -3,7 +3,7 @@
 
 use crate::error::BuildError;
 use crate::handler::{DomainEvent, EventHandler};
-use crate::registry::{ErasedHandler, Registry, TypedHandler};
+use crate::registry::{ErasedHandler, RegisteredHandler, Registry, TypedHandler};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -255,7 +255,7 @@ impl OutboxBuilder {
         let config = self.config.unwrap_or_default();
 
         // Validate handler entries; build Registry.
-        let mut handlers: HashMap<String, Arc<dyn ErasedHandler>> = HashMap::new();
+        let mut handlers: HashMap<String, RegisteredHandler> = HashMap::new();
         let mut by_type: HashMap<&'static str, Vec<String>> = HashMap::new();
 
         for entry in self.pending {
@@ -278,7 +278,13 @@ impl OutboxBuilder {
                 .entry(entry.event_type)
                 .or_default()
                 .push(entry.handler_id.clone());
-            handlers.insert(entry.handler_id, entry.handler);
+            handlers.insert(
+                entry.handler_id,
+                RegisteredHandler {
+                    handler: entry.handler,
+                    handler_timeout: None,
+                },
+            );
         }
 
         let registry = Arc::new(Registry { handlers, by_type });
