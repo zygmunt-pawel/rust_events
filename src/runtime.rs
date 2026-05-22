@@ -176,52 +176,6 @@ impl OutboxRuntime {
         env: HandlerEnvelope,
         ctx: pg_work_queue::JobContext,
     ) -> Result<(), pg_work_queue::JobError> {
-        // ① Registry lookup BEFORE touching the audit row — but ONLY for loose
-        // mode. Loose mode must leave `handler_deliveries` completely untouched
-        // (status stays 'queued', attempts stays 0) when a handler is absent, so
-        // we return early here without executing the CTE.
-        //
-        // Strict mode defers the lookup until AFTER the CTE transition (step ③)
-        // so that the row is already in 'running' state when we call
-        // `mark_dead_fenced` — the status invariant requires the row to be
-        // 'running' before it can be marked 'dead'.
-        if self.registry.lookup(&env.handler_id).is_none() && !self.config.strict_handler_lookup {
-            // Loose mode: status stays 'queued', attempts stays 0, lease_token
-            // stays NULL so another replica can still claim — we only bump the
-            // orthogonal `resolve_attempts` counter so operators can detect
-            // never-deployed handlers via a single SELECT instead of relying
-            // on tracing-log retention. Best-effort: if the UPDATE fails we
-            // still return retry, the counter will catch up on the next claim.
-            let bumped = sqlx::query(
-                "UPDATE outbox.handler_deliveries
-                    SET resolve_attempts = resolve_attempts + 1,
-                        last_resolve_attempt_at = now()
-                  WHERE event_id = $1 AND handler_id = $2 AND status = 'queued'",
-            )
-            .bind(env.event_id)
-            .bind(&env.handler_id)
-            .execute(&self.pool)
-            .await;
-            if let Err(e) = &bumped {
-                tracing::warn!(
-                    target: "rust_events.worker.resolve_bump_failed",
-                    event_id = %env.event_id,
-                    handler_id = %env.handler_id,
-                    error = %crate::util::redact_db_error(e),
-                    "loose-mode resolve_attempts UPDATE failed; continuing"
-                );
-            }
-            tracing::warn!(
-                target: "rust_events.worker.handler_missing",
-                event_id = %env.event_id,
-                handler_id = %env.handler_id,
-                "handler not in this replica's registry; retrying"
-            );
-            return Err(pg_work_queue::JobError::retry(
-                "handler not registered in this replica",
-            ));
-        }
-
         // ② Atomic transition + event/dispatch_key fetch via fenced CTE.
         struct Row {
             payload: Vec<u8>,
@@ -332,27 +286,25 @@ impl OutboxRuntime {
             (Some(_), true) => { /* normal path */ }
         }
 
-        // ③b Deferred strict-mode registry check. The row is now 'running'
-        //     (CTE updated it in step ②), so mark_dead_fenced's WHERE
-        //     `status='running' AND lease_token=$token` can match.
+        // ③b Deferred registry check. The job's handler_id is not registered
+        //     in this process — a permanent fault (the handler was removed by
+        //     a deploy). The row is now 'running' (CTE updated it in step ②),
+        //     so mark_dead_fenced's WHERE `status='running' AND
+        //     lease_token=$token` can match. Mark it dead.
         let Some(registered) = self.registry.lookup(&env.handler_id) else {
-            // strict_handler_lookup must be true here — loose mode returned
-            // early in step ①. (Body unchanged from the previous `else`.)
             tracing::error!(
                 target: "rust_events.worker.handler_not_registered",
                 handler_id = %env.handler_id,
-                "handler not in registry (strict mode) → mark_dead"
+                "handler not in registry → mark_dead"
             );
             self.mark_dead_fenced(
                 env.event_id,
                 &env.handler_id,
-                "handler not in registry (strict mode)",
+                "handler not registered",
                 ctx.lease_token,
             )
             .await?;
-            return Err(pg_work_queue::JobError::abort(
-                "handler not registered (strict mode)",
-            ));
+            return Err(pg_work_queue::JobError::abort("handler not registered"));
         };
         // Copy out owned values immediately. `registered` borrows
         // `self.registry`; do NOT reference it past these two lines.

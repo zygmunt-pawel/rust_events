@@ -94,7 +94,6 @@ pub struct OutboxConfig {
     pub(crate) handler_timeout: Duration,
     pub(crate) retry_backoff: BackoffPolicy,
     pub(crate) panic_policy: PanicPolicy,
-    pub(crate) strict_handler_lookup: bool,
     pub(crate) decode_error_strategy: DecodeStrategy,
 }
 
@@ -118,7 +117,6 @@ impl Default for OutboxConfig {
             handler_timeout: Duration::from_secs(240), // 80% of 300s lease
             retry_backoff: BackoffPolicy::default(),
             panic_policy: PanicPolicy::default(),
-            strict_handler_lookup: false,
             decode_error_strategy: DecodeStrategy::Retry,
         }
     }
@@ -177,13 +175,6 @@ impl OutboxConfigBuilder {
     #[must_use]
     pub const fn panic_policy(mut self, p: PanicPolicy) -> Self {
         self.cfg.panic_policy = p;
-        self
-    }
-
-    /// When `true`, missing handler IDs in the registry cause an error at dispatch time.
-    #[must_use]
-    pub const fn strict_handler_lookup(mut self, strict: bool) -> Self {
-        self.cfg.strict_handler_lookup = strict;
         self
     }
 
