@@ -266,12 +266,25 @@ impl Outbox {
         .execute(&mut **tx)
         .await?;
 
-        // 9. Push N jobs to pg_work_queue.
-        let envelopes: Vec<HandlerEnvelope> = handler_ids
+        // 9. Push N jobs to pg_work_queue. The concurrency key is the
+        //    handler_id, but stamped ONLY for handlers that have a
+        //    concurrency_limit configured — keying every job would double
+        //    pgwq's claim-index write churn for no benefit.
+        let envelopes: Vec<(HandlerEnvelope, Option<String>)> = handler_ids
             .iter()
-            .map(|hid| HandlerEnvelope {
-                event_id,
-                handler_id: hid.clone(),
+            .map(|hid| {
+                let key = self
+                    .registry
+                    .lookup(hid)
+                    .and_then(|h| h.concurrency_limit)
+                    .map(|_| hid.clone());
+                (
+                    HandlerEnvelope {
+                        event_id,
+                        handler_id: hid.clone(),
+                    },
+                    key,
+                )
             })
             .collect();
         pg_work_queue::Pusher::new(PGWQ_QUEUE)
@@ -313,10 +326,11 @@ impl Outbox {
     /// # Intended usage
     ///
     /// `Outbox` is designed for build-once, start-once-per-process semantics.
-    /// Running multiple `Outbox` instances against the same database (e.g.,
-    /// across replicas) IS supported — `pg_work_queue`'s
-    /// `FOR UPDATE SKIP LOCKED` claim and fencing tokens make concurrent
-    /// workers safe.
+    /// `rust_events` is **single-instance**: run exactly one `Outbox` worker
+    /// process per database. Per-handler `concurrency_limit` is enforced by an
+    /// in-process counter and is only correct under that assumption; running
+    /// multiple worker processes against one queue would multiply every
+    /// per-handler limit by the process count.
     ///
     /// # Errors
     ///
@@ -380,11 +394,20 @@ impl Outbox {
         });
 
         let runtime_for_handler = runtime.clone();
+        // Per-handler concurrency limits → pgwq's per-key concurrency.
+        // Key = handler_id; only handlers with a configured limit appear.
+        let concurrency_limits: Vec<(String, u32)> = self
+            .registry
+            .handlers
+            .iter()
+            .filter_map(|(id, h)| h.concurrency_limit.map(|n| (id.clone(), n)))
+            .collect();
         let inner = pg_work_queue::Worker::<HandlerEnvelope>::builder()
             .pool(self.pool.clone())
             .queue(PGWQ_QUEUE)
             .poll_interval(self.config.poll_interval)
             .concurrency(usize::try_from(self.config.concurrency).unwrap_or(usize::MAX))
+            .concurrency_limits(concurrency_limits)
             .max_attempts(self.config.max_attempts)
             .lease_timeout(self.config.lease_timeout)
             .handler_timeout(self.config.handler_timeout)

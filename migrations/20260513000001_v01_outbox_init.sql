@@ -112,13 +112,6 @@ CREATE TABLE outbox.handler_deliveries (
     handler_id              TEXT        COLLATE "C" NOT NULL,
     status                  outbox.delivery_status NOT NULL DEFAULT 'queued',
     attempts                INTEGER     NOT NULL DEFAULT 0,
-    -- Loose-mode handler-lookup counter. Bumped each time a worker claims a
-    -- job whose handler_id is not in its in-memory registry (loose mode only;
-    -- strict mode dead-letters and never touches this column). Operators can
-    -- alert on rows where resolve_attempts > N to detect undeployed handlers
-    -- without depending on tracing-level retention.
-    resolve_attempts        INTEGER     NOT NULL DEFAULT 0,
-    last_resolve_attempt_at TIMESTAMPTZ,
     last_error              TEXT,
     -- Fencing token: NULL when not running, set to JobContext.lease_token while
     -- in 'running'. Cleared on every transition out of 'running'. All mark_*
@@ -135,8 +128,6 @@ CREATE TABLE outbox.handler_deliveries (
         CHECK (octet_length(handler_id) BETWEEN 1 AND 128),
     CONSTRAINT handler_deliveries_attempts_nonneg
         CHECK (attempts >= 0),
-    CONSTRAINT handler_deliveries_resolve_attempts_nonneg
-        CHECK (resolve_attempts >= 0),
     CONSTRAINT handler_deliveries_last_error_bytes
         CHECK (last_error IS NULL OR octet_length(last_error) <= 8192),
     CONSTRAINT handler_deliveries_temporal CHECK (

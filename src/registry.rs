@@ -70,6 +70,9 @@ pub(crate) struct RegisteredHandler {
     /// Per-handler `handler_timeout` override; `None` ⇒ use the global
     /// [`crate::builder::OutboxConfig`] `handler_timeout`.
     pub(crate) handler_timeout: Option<Duration>,
+    /// Per-handler concurrency cap; `None` ⇒ unbounded. Fed to
+    /// `pg_work_queue`'s `WorkerBuilder::concurrency_limits` at `start()`.
+    pub(crate) concurrency_limit: Option<u32>,
 }
 
 /// In-memory registry mapping handler IDs to [`RegisteredHandler`]s
