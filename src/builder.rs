@@ -77,12 +77,6 @@ impl HandlerOptions {
     /// (≈ `d - 200 ms`): the crate reserves the tail of the window for its own
     /// `mark_*_fenced` audit write. A `d` near the 400 ms floor leaves a very
     /// small actual budget.
-    ///
-    /// Multi-replica: the override is resolved from the registry of whichever
-    /// replica claims the job. Keep `HandlerOptions` consistent across replicas
-    /// — if the same `handler_id` carries different overrides on different
-    /// replicas, delivery stays at-least-once-safe but the effective timeout
-    /// for a given attempt is whichever replica won the claim.
     #[must_use]
     pub const fn handler_timeout(mut self, d: Duration) -> Self {
         self.handler_timeout = Some(d);
