@@ -4,8 +4,8 @@
 mod common;
 
 use rust_events::{
-    DispatchContext, DomainEvent, EventHandler, HandlerContext, HandlerError, HandlerOptions,
-    OutboxBuilder, OutboxConfig,
+    DeliveryStatus, DispatchContext, DispatchOutcome, DomainEvent, EventHandler, HandlerContext,
+    HandlerError, HandlerOptions, OutboxBuilder, OutboxConfig,
 };
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -34,7 +34,7 @@ impl EventHandler<Ev> for Probe {
     }
 }
 
-/// A handler registered with concurrency_limit(1) must never run two
+/// A handler registered with `concurrency_limit(1)` must never run two
 /// invocations concurrently, even when many events of its type are queued
 /// and the worker-wide concurrency is higher than 1.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -63,10 +63,14 @@ async fn concurrency_limit_one_serializes_handler() {
         .unwrap();
 
     // Dispatch 6 events of the limited type.
+    let mut event_ids = Vec::new();
     for _ in 0..6 {
         let mut tx = pool.begin().await.unwrap();
         let ctx = DispatchContext::new("default");
-        outbox.dispatch(&mut tx, &ctx, &Ev).await.unwrap();
+        match outbox.dispatch(&mut tx, &ctx, &Ev).await.unwrap() {
+            DispatchOutcome::Dispatched { event_id, .. } => event_ids.push(event_id),
+            other => panic!("expected Dispatched, got {other:?}"),
+        }
         tx.commit().await.unwrap();
     }
 
@@ -80,4 +84,17 @@ async fn concurrency_limit_one_serializes_handler() {
         1,
         "concurrency_limit(1) must serialize the handler; observed peak > 1"
     );
+
+    // Control: all 6 deliveries must have actually run to `sent` — proves the
+    // `peak == 1` above is real serialization, not an artifact of under-dispatch.
+    let history = outbox.history();
+    for eid in &event_ids {
+        let rows = history.handler_deliveries_for(*eid).await.unwrap();
+        assert_eq!(rows.len(), 1, "exactly one delivery per event");
+        assert_eq!(
+            rows[0].status,
+            DeliveryStatus::Sent,
+            "every dispatched delivery must have run to completion"
+        );
+    }
 }

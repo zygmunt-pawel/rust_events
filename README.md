@@ -201,14 +201,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 │  per claimed job:
                                 ▼
 ┌──────────────── OutboxRuntime::handle_envelope ────────────────────┐
-│  ① Lookup handler in registry                                      │
-│     missing → mark_dead + abort (handler not deployed)             │
-│                                                                    │
 │  ② Atomic CTE: transition handler_deliveries to 'running',         │
 │     stamp lease_token, fetch event row + dispatch_idempotency_key  │
 │                                                                    │
 │  ③ Already terminal? → return Ok (idempotent skip)                 │
 │     Row missing? → abort with audit_missing tracing                │
+│                                                                    │
+│  ③b Handler not in registry? → mark_dead + abort                   │
 │                                                                    │
 │  ④ Decode payload; on error apply decode_error_strategy            │
 │     Retry (default) → mark awaiting_retry                          │

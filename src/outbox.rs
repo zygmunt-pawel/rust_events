@@ -326,10 +326,11 @@ impl Outbox {
     /// # Intended usage
     ///
     /// `Outbox` is designed for build-once, start-once-per-process semantics.
-    /// Running multiple `Outbox` instances against the same database (e.g.,
-    /// across replicas) IS supported — `pg_work_queue`'s
-    /// `FOR UPDATE SKIP LOCKED` claim and fencing tokens make concurrent
-    /// workers safe.
+    /// `rust_events` is **single-instance**: run exactly one `Outbox` worker
+    /// process per database. Per-handler `concurrency_limit` is enforced by an
+    /// in-process counter and is only correct under that assumption; running
+    /// multiple worker processes against one queue would multiply every
+    /// per-handler limit by the process count.
     ///
     /// # Errors
     ///

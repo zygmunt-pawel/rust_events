@@ -22,7 +22,7 @@ impl EventHandler<Ev> for H {
     }
 }
 
-/// concurrency_limit(0) is rejected at build() with ConfigInvalid.
+/// A `concurrency_limit` of 0 is rejected at `build()` with `ConfigInvalid`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrency_limit_zero_rejected() {
     let (_c, pool) = common::pg_container().await;
@@ -36,7 +36,7 @@ async fn concurrency_limit_zero_rejected() {
     );
 }
 
-/// A valid concurrency_limit builds successfully.
+/// A valid `concurrency_limit` builds successfully.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrency_limit_valid_builds() {
     let (_c, pool) = common::pg_container().await;

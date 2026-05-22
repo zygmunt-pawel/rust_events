@@ -61,11 +61,11 @@ async fn handler_removed_delivery_marked_dead() {
     let mut status = None;
     for _ in 0..50 {
         let rows = history.handler_deliveries_for(event_id).await.unwrap();
-        if let Some(r) = rows.first() {
-            if matches!(r.status, DeliveryStatus::Dead) {
-                status = Some(r.status);
-                break;
-            }
+        if let Some(r) = rows.first()
+            && matches!(r.status, DeliveryStatus::Dead)
+        {
+            status = Some(r.status);
+            break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
     }

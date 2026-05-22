@@ -46,9 +46,9 @@ user tx ──► outbox.dispatch(&mut tx, ctx, &Event)
             tx.commit()  ◄── all of the above is atomic with user's domain writes
 
 pg_work_queue::Worker (poll loop, FOR UPDATE SKIP LOCKED) ──► OutboxRuntime::handle_envelope
-   ① registry lookup (miss → dead-letter, after the CTE transition)
    ② atomic CTE: handler_deliveries → 'running', stamp lease_token, fetch payload
    ③ already terminal? Ok (idempotent skip)
+   ③b registry lookup: miss → mark_dead + abort (handler removed by a deploy)
    ④ decode payload (DecodeStrategy::{Retry,Abort})
    ⑤ user handler wrapped in tokio::time::timeout + futures::FutureExt::catch_unwind
       ├─ Ok(Ok(o))      → o (normal)
