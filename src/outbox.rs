@@ -266,12 +266,19 @@ impl Outbox {
         .execute(&mut **tx)
         .await?;
 
-        // 9. Push N jobs to pg_work_queue.
-        let envelopes: Vec<HandlerEnvelope> = handler_ids
+        // 9. Push N jobs to pg_work_queue. The per-job concurrency key is
+        //    `None` here; it is stamped with the handler_id for limited
+        //    handlers once `concurrency_limit` is threaded through.
+        let envelopes: Vec<(HandlerEnvelope, Option<String>)> = handler_ids
             .iter()
-            .map(|hid| HandlerEnvelope {
-                event_id,
-                handler_id: hid.clone(),
+            .map(|hid| {
+                (
+                    HandlerEnvelope {
+                        event_id,
+                        handler_id: hid.clone(),
+                    },
+                    None,
+                )
             })
             .collect();
         pg_work_queue::Pusher::new(PGWQ_QUEUE)
