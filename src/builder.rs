@@ -36,8 +36,8 @@ pub enum DecodeStrategy {
 /// (per-handler bounds are checked against the global config at
 /// [`OutboxBuilder::build`], which is the only place both values are known).
 /// It still follows the crate's `const fn` setter / `#[must_use]` convention.
-/// Currently the only knob is
-/// [`handler_timeout`](HandlerOptions::handler_timeout).
+/// The knobs are [`handler_timeout`](HandlerOptions::handler_timeout) and
+/// [`concurrency_limit`](HandlerOptions::concurrency_limit).
 ///
 /// Not `Copy` on purpose: this type is an extension point, and a future
 /// non-`Copy` field should not be a breaking change.
@@ -46,6 +46,11 @@ pub struct HandlerOptions {
     /// Per-handler `handler_timeout` override; `None` ⇒ use the global value.
     /// Private — only read inside this module (`register_handler`, `build`).
     handler_timeout: Option<Duration>,
+    /// Per-handler concurrency cap — at most this many invocations of this
+    /// handler run at once. `None` ⇒ unbounded (only the global
+    /// `OutboxConfig::concurrency` applies). Private — read in
+    /// `register_handler` and `build`.
+    concurrency_limit: Option<u32>,
 }
 
 impl HandlerOptions {
@@ -54,6 +59,7 @@ impl HandlerOptions {
     pub const fn new() -> Self {
         Self {
             handler_timeout: None,
+            concurrency_limit: None,
         }
     }
 
@@ -80,6 +86,25 @@ impl HandlerOptions {
     #[must_use]
     pub const fn handler_timeout(mut self, d: Duration) -> Self {
         self.handler_timeout = Some(d);
+        self
+    }
+
+    /// Cap the number of concurrent invocations of *this* handler.
+    ///
+    /// At most `n` tasks for this handler run at once, gated at job-claim
+    /// time by `pg_work_queue` (a saturated handler's jobs are simply not
+    /// claimed — no head-of-line blocking). `None` (the default) leaves the
+    /// handler bounded only by the global [`OutboxConfig`] `concurrency`.
+    ///
+    /// `n` must be `1..=i32::MAX`; `0` is rejected at [`OutboxBuilder::build`]
+    /// with [`BuildError::ConfigInvalid`]. There is no cross-knob constraint
+    /// with `OutboxConfig::concurrency` — the two are independent axes.
+    ///
+    /// Single-instance: the cap is enforced by an in-process counter, correct
+    /// because the service runs as exactly one worker process.
+    #[must_use]
+    pub const fn concurrency_limit(mut self, n: u32) -> Self {
+        self.concurrency_limit = Some(n);
         self
     }
 }
@@ -413,5 +438,25 @@ mod tests {
             .handler_timeout(Duration::from_secs(1))
             .handler_timeout(Duration::from_secs(2));
         assert_eq!(o.handler_timeout, Some(Duration::from_secs(2)));
+    }
+
+    #[test]
+    fn handler_options_records_concurrency_limit() {
+        let o = HandlerOptions::new().concurrency_limit(4);
+        assert_eq!(o.concurrency_limit, Some(4));
+    }
+
+    #[test]
+    fn handler_options_default_has_no_concurrency_limit() {
+        assert_eq!(HandlerOptions::default().concurrency_limit, None);
+        assert_eq!(HandlerOptions::new().concurrency_limit, None);
+    }
+
+    #[test]
+    fn handler_options_last_concurrency_limit_wins() {
+        let o = HandlerOptions::new()
+            .concurrency_limit(1)
+            .concurrency_limit(8);
+        assert_eq!(o.concurrency_limit, Some(8));
     }
 }
