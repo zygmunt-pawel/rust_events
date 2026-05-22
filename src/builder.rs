@@ -94,8 +94,9 @@ impl HandlerOptions {
     /// with [`BuildError::ConfigInvalid`]. There is no cross-knob constraint
     /// with `OutboxConfig::concurrency` — the two are independent axes.
     ///
-    /// Single-instance: the cap is enforced by an in-process counter, correct
-    /// because the service runs as exactly one worker process.
+    /// Single-instance: the cap is enforced by `pg_work_queue` at job-claim
+    /// time, backed by a process-local counter — correct because the service
+    /// runs as exactly one worker process.
     #[must_use]
     pub const fn concurrency_limit(mut self, n: u32) -> Self {
         self.concurrency_limit = Some(n);

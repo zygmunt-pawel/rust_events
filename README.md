@@ -8,11 +8,11 @@ Full design rationale: `docs/superpowers/specs/2026-05-13-rust-events-design.md`
 
 ## Status
 
-- Version: `0.4.0` (pre-publish)
+- Version: `0.4.1` (pre-publish)
 - Requires: PostgreSQL 18+ (uses `uuidv7()` native), Rust 1.88+
 - License: MIT
 - Deployment model: a single worker process per database (single-instance — see [Known limitations](#known-limitations))
-- Depends on: `pg_work_queue` v0.1.4 (tag-pinned via git; `set_ignore_missing(true)` migrator coexistence is load-bearing; v0.1.4 adds the per-key concurrency limiting used by `HandlerOptions::concurrency_limit`)
+- Depends on: `pg_work_queue` v0.1.5 (tag-pinned via git; `set_ignore_missing(true)` migrator coexistence is load-bearing; pg_work_queue's per-key concurrency limiting is what backs `HandlerOptions::concurrency_limit`)
 
 This crate is production-ready for modular monolith workloads on Postgres 18. Neither `rust_events` nor `pg_work_queue` is yet published to crates.io; reference both via git dependency.
 
@@ -61,8 +61,8 @@ Add to `Cargo.toml`:
 
 ```toml
 [dependencies]
-rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.4.0" }
-pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.4" }
+rust_events = { git = "https://github.com/zygmunt-pawel/rust_events.git", tag = "v0.4.1" }
+pg_work_queue = { git = "https://github.com/zygmunt-pawel/pg_work_queue.git", tag = "v0.1.5" }
 sqlx = { version = "=0.8.6", features = ["postgres", "runtime-tokio-rustls", "migrate"] }
 serde = { version = "=1.0.228", features = ["derive"] }
 ```
@@ -358,7 +358,7 @@ The per-handler value may only **match or tighten** the global budget: it must b
 )
 ```
 
-At most `n` tasks for that handler run concurrently. The cap is gated at job-claim time: a saturated handler's jobs are simply not claimed, so they neither occupy worker slots nor block other handlers (no head-of-line blocking). `n` must be `1..=i32::MAX`; `0` is rejected at `build()` with `BuildError::ConfigInvalid`. There is no cross-knob constraint with `OutboxConfig::concurrency` — the two are independent axes; a handler with no `concurrency_limit` is bounded only by the global `concurrency`. The cap is enforced by an in-process counter, correct because `rust_events` runs as a single worker process (see [Known limitations](#known-limitations)).
+At most `n` tasks for that handler run concurrently. The cap is gated at job-claim time: a saturated handler's jobs are simply not claimed, so they neither occupy worker slots nor block other handlers (no head-of-line blocking). `n` must be `1..=i32::MAX`; `0` is rejected at `build()` with `BuildError::ConfigInvalid`. There is no cross-knob constraint with `OutboxConfig::concurrency` — the two are independent axes; a handler with no `concurrency_limit` is bounded only by the global `concurrency`. The cap is enforced by `pg_work_queue` at job-claim time, backed by a process-local counter — correct because `rust_events` runs as a single worker process (see [Known limitations](#known-limitations)).
 
 ### `Outbox`
 
@@ -438,7 +438,7 @@ All instrumentation is via `tracing`. No metrics endpoint. Build a `tracing::Lay
 | `rust_events.worker.audit_missing` | ERROR | `handler_deliveries` row missing — audit corruption |
 | `rust_events.worker.audit_inconsistent` | ERROR | Non-terminal row failed UPDATE unexpectedly |
 | `rust_events.audit.fenced_out` | WARN | `mark_*` returned `rows_affected=0` — stale worker |
-| `rust_events.audit.mark_pool_starved` | WARN | `mark_*_fenced` failed on `PoolTimedOut`/`PoolClosed`/`Io` — see Known Limitations #7 |
+| `rust_events.audit.mark_pool_starved` | WARN | `mark_*_fenced` failed on `PoolTimedOut`/`PoolClosed`/`Io` — see Known Limitations #6 |
 | `rust_events.start.current_thread_runtime` | WARN | `Outbox::start` on a `current_thread` runtime with `concurrency > 1` |
 | `rust_events.history` | DEBUG span | Around history queries |
 | `rust_events.purge` | DEBUG span | Around purge functions |
@@ -473,7 +473,7 @@ When you accidentally deploy a breaking payload schema change, the default behav
 Dispatching an event with no registered handler is most often a configuration error: you forgot to call `register_handler` for a new event type. The default `Err(DispatchError::NoHandlersRegistered)` surfaces this loudly, and no DB write is performed (cheaper to bail). Opt into `true` only when you intentionally want to persist events for audit without routing them anywhere.
 
 **Single-instance by design.**
-`rust_events` runs as exactly one worker process per database. A handler that is not in the registry at claim time is a permanent fault (the handler was removed by a deploy) and the delivery is marked `dead` on first claim — there is no other replica that might still have it. Per-handler `concurrency_limit` is likewise enforced by an in-process counter, which is correct precisely because there is only one worker process. Crash-recovery machinery (fencing tokens, the `pg_work_queue` reaper, lease timeouts) is unchanged and still required — a single process still crashes and restarts.
+`rust_events` runs as exactly one worker process per database. A handler that is not in the registry at claim time is a permanent fault (the handler was removed by a deploy) and the delivery is marked `dead` on first claim — there is no other replica that might still have it. Per-handler `concurrency_limit` is likewise gated at job-claim time by a process-local counter, which is correct precisely because there is only one worker process. Crash-recovery machinery (fencing tokens, the `pg_work_queue` reaper, lease timeouts) is unchanged and still required — a single process still crashes and restarts.
 
 **User handler is wrapped inside `handle_envelope`, even though `pg_work_queue` already provides `handler_timeout` and `panic_policy`.**
 Both pgwq mechanisms cancel / flip `pgwq.jobs` *without* calling our handler closure again, which would leave `outbox.handler_deliveries` stuck at `status='running'`. We wrap `handler.handle_erased(...)` in `tokio::time::timeout` (firing `HANDLER_CLEANUP_BUDGET = 200ms` before pgwq's outer timer) and `futures::FutureExt::catch_unwind`, then route both branches through `HandlerError::{retry,abort}`. The existing step ⑦ machinery then calls `mark_*_fenced` and returns `JobError` to pgwq — pgwq applies its own scheduling on `pgwq.jobs` consistently. Net effect: both audit rows reach terminal states together, panic_policy semantics are preserved, and the worker's `handler_timeout` setting still bounds wall-clock per attempt.
@@ -492,9 +492,30 @@ Both pgwq mechanisms cancel / flip `pgwq.jobs` *without* calling our handler clo
 
 5. **`HandlerError::{Retry,Skip,Abort}::reason` is durable and operator-visible.** Reason strings are persisted in `outbox.handler_deliveries.last_error` AND `pgwq.jobs.last_error`, and surface in operator logs and tracing. Do NOT format payload values, user PII (emails, names, tokens), or other sensitive data into the reason. Prefer enum-like categories — `"upstream_5xx"`, `"rate_limited"`, `"feature_flag_off"`. For detail, use `tracing::error!()` from inside the handler instead; tracing has its own retention policy distinct from the audit columns. Reason strings are sanitized for control characters and ANSI escapes (NUL → `?`, etc.) before storage and truncated to 8 KiB.
 
-6. **Connection-pool sizing.** `pg_work_queue` enforces `pool.options().get_max_connections() >= concurrency × 2 + 2` at `start()`. That covers the worker's own use: one connection for the user handler (claim path) and one for `mark_*_fenced` per concurrent job, plus two for poll and reaper. Anything else hitting the same pool — `Outbox::dispatch` inside user request-handling code, `History::*` queries, `purge_*` sweepers, the `OutboxHandle::shutdown` pending-count query — competes for whatever slack you size above that minimum. When the pool is exhausted, `mark_*_fenced` can fail with `sqlx::Error::PoolTimedOut` BEFORE pgwq's outer `handler_timeout` cancels the wrapper; the audit row then stays `'running'` with our `lease_token` set until pgwq's reaper reclaims it (default `lease_timeout = 300s`). Symptom: a spike of `rust_events.audit.mark_pool_starved` warn-tracing events. Mitigation: size `max_connections >= concurrency × 2 + 2 + (peak concurrent dispatch/history/purge connections on this pool)`. If you have unrelated traffic on the pool, an even higher floor is appropriate.
+6. **Connection-pool sizing — operator responsibility.** This is the one knob the operator *must* get right; an undersized pool can permanently strand a delivery. Read this section before sizing your `PgPool`.
 
-7. **The `pg_work_queue` v0.1.4 `concurrency_key` migration locks `pgwq.jobs`.** The `20260521000000_v01_concurrency_key.sql` migration builds two indexes non-`CONCURRENTLY`, so it holds `ACCESS EXCLUSIVE` on `pgwq.jobs` for its whole duration — blocking reads and writes (claims, marks, the reaper, pushes). On a queue table kept small by purging this is sub-second; on a large unpurged table it is a full read+write stall proportional to row count. Purge before migrating a hot, large queue table.
+   **The floor (enforced).** `Outbox::start()` rejects any pool whose `max_connections` is below `concurrency × 2 + 2`, returning `StartError::PoolTooSmall { max_connections, concurrency, required }` (`pg_work_queue`'s own `Worker::build()` enforces the same floor as a backstop). The floor covers the worker's own use: one connection for the claim path and one for `mark_*_fenced` per concurrent job, plus two for poll and reaper.
+
+   **The headroom (yours to size).** The floor covers *only* the worker. Anything else on the same pool — `Outbox::dispatch` called inside your request handlers, `History::*` queries, `purge_*` sweepers, the `OutboxHandle::shutdown` pending-count query, and any unrelated application traffic — competes for whatever slack you add above the floor. `rust_events` cannot size this for you: it has no way to know how many connections your application code holds. Size it yourself:
+
+   ```text
+   max_connections  >=  concurrency × 2 + 2                    ← the enforced floor
+                     +  peak concurrent dispatch() calls        ← your request traffic
+                     +  peak concurrent History::* / purge_* calls
+                     +  any other traffic sharing this pool
+   ```
+
+   For example, at the default `concurrency = 16` the floor is `34`; a service that also dispatches from HTTP handlers and runs a purge schedule on the same pool should size `max_connections` to `50`+.
+
+   **What goes wrong if the pool is too small (between the floor and your real need).** When the pool is exhausted, a `mark_*_fenced` audit UPDATE may fail to acquire a connection before `pg_work_queue`'s outer `handler_timeout` cancels the worker's wrapper. Then:
+   - **On a non-final attempt** the delivery self-heals: `pg_work_queue` re-delivers the job and the claim CTE re-claims the still-`running` row, so the next attempt completes the transition.
+   - **On the final attempt** (`attempt == max_attempts`) there is no re-delivery — `pg_work_queue` marks its own job `dead` and never hands the envelope back. The `outbox.handler_deliveries` row is left **permanently at `status='running'`**. Nothing recovers it automatically.
+
+   **Symptom.** A spike of `rust_events.audit.mark_pool_starved` warn-tracing events (emitted whenever a `mark_*_fenced` UPDATE fails on `PoolTimedOut` / `PoolClosed` / `Io`). Treat any occurrence as "the pool is undersized — increase `max_connections`."
+
+   **Bottom line.** Sized correctly, this failure mode cannot occur — `mark_*_fenced` always gets a connection within budget. It is entirely preventable by the operator, which is why pool sizing is documented here as a hard requirement rather than guarded by extra machinery inside the crate.
+
+7. **The `pg_work_queue` `concurrency_key` migration locks `pgwq.jobs`.** The `20260521000000_v01_concurrency_key.sql` migration builds two indexes non-`CONCURRENTLY`, so it holds `ACCESS EXCLUSIVE` on `pgwq.jobs` for its whole duration — blocking reads and writes (claims, marks, the reaper, pushes). On a queue table kept small by purging this is sub-second; on a large unpurged table it is a full read+write stall proportional to row count. Purge before migrating a hot, large queue table.
 
 ---
 

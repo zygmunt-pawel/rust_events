@@ -212,8 +212,13 @@ impl OutboxRuntime {
                     -- GREATEST so a stale-worker fence-out followed by a fresh
                     -- claim (where pgwq's ctx.attempt resets) cannot regress
                     -- the audit counter. Operators alerting on attempts > N
-                    -- see monotone growth, not flapping.
-                    attempts = GREATEST(hd.attempts, $3),
+                    -- see monotone growth, not flapping. The literal 1 floors
+                    -- the result so the 'running' arm of
+                    -- handler_deliveries_status_invariants (attempts > 0)
+                    -- holds even on a fresh row (hd.attempts = 0) regardless
+                    -- of the incoming ctx.attempt — defence in depth against
+                    -- a future pgwq delivering a 0-indexed attempt.
+                    attempts = GREATEST(hd.attempts, $3, 1),
                     last_attempted_at = now(),
                     first_attempted_at = COALESCE(hd.first_attempted_at, now()),
                     last_error = NULL

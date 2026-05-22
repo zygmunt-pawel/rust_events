@@ -369,6 +369,28 @@ impl Outbox {
         // process lifetime.
         let mut guard = StartedGuard::new(&self.started);
 
+        // Pool-size floor. pg_work_queue's claim path and our `mark_*_fenced`
+        // audit write each need a connection per in-flight job, plus two for
+        // poll and reaper: `max_connections` must be >= concurrency × 2 + 2.
+        // pgwq's own `Worker::build()` also enforces this, but we check it
+        // first so the failure surfaces as a rust_events-level error that
+        // names the consequence — an undersized pool can starve
+        // `mark_*_fenced` and strand a delivery at `status='running'`.
+        // Headroom above this floor for dispatch/History/purge traffic on the
+        // same pool is the operator's responsibility (README "Connection-pool
+        // sizing").
+        let max_connections = self.pool.options().get_max_connections();
+        let required = u64::from(self.config.concurrency)
+            .saturating_mul(2)
+            .saturating_add(2);
+        if u64::from(max_connections) < required {
+            return Err(StartError::PoolTooSmall {
+                max_connections,
+                concurrency: self.config.concurrency,
+                required,
+            });
+        }
+
         // Schema probe: no-op SELECT against outbox.events. If migrator was
         // not run, SQLSTATE 42P01 (undefined_table) or 3F000 (invalid_schema)
         // surfaces as StartError::SchemaMissing — caller fails fast instead

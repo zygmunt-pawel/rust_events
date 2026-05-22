@@ -165,6 +165,20 @@ pub struct HandlerContext {
 /// No `#[async_trait]` macro required (and no `Pin<Box<dyn Future>>` per
 /// invocation). The returned future must be `Send` — the worker spawns it
 /// onto a multi-threaded executor.
+///
+/// # Handlers must not block the runtime
+///
+/// `handle` runs on the worker's `tokio` executor, and the crate wraps it in
+/// `tokio::time::timeout` to enforce the `handler_timeout` budget. That
+/// timeout can only fire while the future is being polled. A handler that
+/// performs **blocking** work — synchronous file or network I/O,
+/// `std::thread::sleep`, a CPU-bound loop, a blocking database driver — never
+/// yields back to the runtime, so the timeout cannot fire, other handlers on
+/// the same worker thread starve, and the worker slot (plus any
+/// [`HandlerOptions::concurrency_limit`](crate::HandlerOptions::concurrency_limit)
+/// permit) stays held indefinitely. Keep `handle` cooperatively async: use
+/// async I/O, and move unavoidable blocking or CPU-bound work to
+/// [`tokio::task::spawn_blocking`].
 pub trait EventHandler<E: DomainEvent>: Send + Sync + 'static {
     /// Handle the given event with the provided delivery context.
     fn handle(

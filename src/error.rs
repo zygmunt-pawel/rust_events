@@ -197,6 +197,31 @@ pub enum StartError {
     #[error("outbox schema missing — did you run rust_events::migrator()?")]
     SchemaMissing(#[source] sqlx::Error),
 
+    /// The supplied `PgPool` is too small for the configured `concurrency`.
+    ///
+    /// `pg_work_queue`'s claim path and the crate's `mark_*_fenced` audit
+    /// write each need a connection per in-flight job, plus two for poll and
+    /// reaper — so `max_connections` must be at least `concurrency × 2 + 2`.
+    /// An undersized pool can starve `mark_*_fenced`: if the audit UPDATE
+    /// cannot acquire a connection before `pg_work_queue`'s outer
+    /// `handler_timeout` cancels the wrapper, a delivery can be stranded at
+    /// `status='running'`. Size the pool above this floor, plus headroom for
+    /// any `dispatch`/`History`/`purge_*` traffic sharing it — see the README
+    /// "Connection-pool sizing" limitation.
+    #[error(
+        "connection pool too small: max_connections={max_connections}, but \
+         concurrency={concurrency} requires at least {required} \
+         (concurrency × 2 + 2)"
+    )]
+    PoolTooSmall {
+        /// `max_connections` configured on the supplied `PgPool`.
+        max_connections: u32,
+        /// The configured worker `concurrency`.
+        concurrency: u32,
+        /// Minimum `max_connections` required: `concurrency × 2 + 2`.
+        required: u64,
+    },
+
     /// Building the underlying `pg_work_queue` worker failed.
     #[error("pg_work_queue worker build failed")]
     PgwqBuild(#[from] pg_work_queue::BuildError),

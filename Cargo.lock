@@ -1524,8 +1524,8 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "pg_work_queue"
-version = "0.1.4"
-source = "git+https://github.com/zygmunt-pawel/pg_work_queue.git?tag=v0.1.4#45f7214108d4687720eb3df371b70fb8e0288fd1"
+version = "0.1.5"
+source = "git+https://github.com/zygmunt-pawel/pg_work_queue.git?tag=v0.1.5#edbbfbb4ed52810997c72d03cd00197c8d98e2ab"
 dependencies = [
  "chrono",
  "rand 0.10.1",
@@ -1914,7 +1914,7 @@ dependencies = [
 
 [[package]]
 name = "rust_events"
-version = "0.4.0"
+version = "0.4.1"
 dependencies = [
  "async-trait",
  "chrono",
