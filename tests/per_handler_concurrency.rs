@@ -54,11 +54,7 @@ async fn concurrency_limit_one_serializes_handler() {
     // without the per-key limit, several Probe tasks could overlap.
     let outbox = OutboxBuilder::new(pool.clone())
         .config(OutboxConfig::builder().concurrency(4).build().unwrap())
-        .register_handler::<Ev, _>(
-            "limited",
-            probe,
-            HandlerOptions::new().concurrency_limit(1),
-        )
+        .register_handler::<Ev, _>("limited", probe, HandlerOptions::new().concurrency_limit(1))
         .build()
         .unwrap();
 
