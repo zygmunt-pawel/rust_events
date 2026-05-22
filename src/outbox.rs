@@ -266,18 +266,24 @@ impl Outbox {
         .execute(&mut **tx)
         .await?;
 
-        // 9. Push N jobs to pg_work_queue. The per-job concurrency key is
-        //    `None` here; it is stamped with the handler_id for limited
-        //    handlers once `concurrency_limit` is threaded through.
+        // 9. Push N jobs to pg_work_queue. The concurrency key is the
+        //    handler_id, but stamped ONLY for handlers that have a
+        //    concurrency_limit configured — keying every job would double
+        //    pgwq's claim-index write churn for no benefit.
         let envelopes: Vec<(HandlerEnvelope, Option<String>)> = handler_ids
             .iter()
             .map(|hid| {
+                let key = self
+                    .registry
+                    .lookup(hid)
+                    .and_then(|h| h.concurrency_limit)
+                    .map(|_| hid.clone());
                 (
                     HandlerEnvelope {
                         event_id,
                         handler_id: hid.clone(),
                     },
-                    None,
+                    key,
                 )
             })
             .collect();
@@ -387,11 +393,20 @@ impl Outbox {
         });
 
         let runtime_for_handler = runtime.clone();
+        // Per-handler concurrency limits → pgwq's per-key concurrency.
+        // Key = handler_id; only handlers with a configured limit appear.
+        let concurrency_limits: Vec<(String, u32)> = self
+            .registry
+            .handlers
+            .iter()
+            .filter_map(|(id, h)| h.concurrency_limit.map(|n| (id.clone(), n)))
+            .collect();
         let inner = pg_work_queue::Worker::<HandlerEnvelope>::builder()
             .pool(self.pool.clone())
             .queue(PGWQ_QUEUE)
             .poll_interval(self.config.poll_interval)
             .concurrency(usize::try_from(self.config.concurrency).unwrap_or(usize::MAX))
+            .concurrency_limits(concurrency_limits)
             .max_attempts(self.config.max_attempts)
             .lease_timeout(self.config.lease_timeout)
             .handler_timeout(self.config.handler_timeout)
