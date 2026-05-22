@@ -278,6 +278,7 @@ struct PendingHandler {
     handler_id: String,
     handler: Arc<dyn ErasedHandler>,
     handler_timeout: Option<Duration>,
+    concurrency_limit: Option<u32>,
 }
 
 impl OutboxBuilder {
@@ -330,6 +331,7 @@ impl OutboxBuilder {
             handler_id: handler_id.into(),
             handler: erased,
             handler_timeout: options.handler_timeout,
+            concurrency_limit: options.concurrency_limit,
         });
         self
     }
@@ -390,6 +392,15 @@ impl OutboxBuilder {
                     )));
                 }
             }
+            if let Some(limit) = entry.concurrency_limit
+                && (limit == 0 || limit > i32::MAX as u32)
+            {
+                return Err(BuildError::ConfigInvalid(format!(
+                    "handler '{}': concurrency_limit must be in 1..=2147483647, \
+                     got {limit}",
+                    entry.handler_id
+                )));
+            }
             by_type
                 .entry(entry.event_type)
                 .or_default()
@@ -399,6 +410,7 @@ impl OutboxBuilder {
                 RegisteredHandler {
                     handler: entry.handler,
                     handler_timeout: entry.handler_timeout,
+                    concurrency_limit: entry.concurrency_limit,
                 },
             );
         }
